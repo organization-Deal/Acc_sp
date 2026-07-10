@@ -2,7 +2,7 @@
 # ReceiptBot — Cloudflare Worker + Durable Object
 # แปลงมาจาก ReceiptBot.gs (Apps Script) — logic เหมือนเดิม เปลี่ยนแค่ layer I/O
 # ════════════════════════════════════════════════════════════════
-name = "receiptbot"
+name = "accoutingsuppor02"
 main = "src/index.js"
 compatibility_date = "2025-01-01"
 

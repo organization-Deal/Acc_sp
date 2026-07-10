@@ -1,10 +1,13 @@
-// ════════════════════════════════════════════════════════════════
+ // ════════════════════════════════════════════════════════════════
 // index.js — Worker entry + SessionDO
 //
-//  • Worker fetch  = รับ webhook (event/card) + ปุ่ม GET
-//  • SessionDO     = 1 instance ต่อ 1 openId → request เข้าคิวเรียงกันเอง
-//                    (แทน LockService.waitLock ของ Apps Script)
-//  • งานหนักหลังกดยืนยัน = ctx.waitUntil (แทน trigger flushJobs — ไม่มีดีเลย์)
+//  v2: รองรับโยนรูปทีเดียวหลายสิบใบ
+//  • processImage เข้าคิวเรียงกันเองใน DO (กันชนกัน) แล้ว "จับคู่สะสม"
+//    ไม่รีเซ็ตทุกครั้ง — รูปที่จับคู่ไม่ได้เก็บใน pool ให้จัดเองทีหลัง
+//  • Debounce ด้วย ctx.storage.setAlarm — รอรูปหยุดไหลก่อนอัปเดตการ์ด
+//    (โยน 50 รูปพร้อมกัน การ์ดจะอัปเดตครั้งเดียวตอนรูปหยุดมา ไม่กระพริบรัว)
+//  • หน้าเว็บ "จัดบิล" (act=sort) ให้ดูรูปทุกใบ ลากเข้าเรื่อง/แก้ยอด-หมวด-ชื่อ
+//    ได้ยืดหยุ่นเต็มที่ ไม่ต้องกลับมาแชท
 // ════════════════════════════════════════════════════════════════
 import { DurableObject } from 'cloudflare:workers';
 import { CFG } from './config.js';
@@ -12,13 +15,20 @@ import {
   claudeOCR, downloadImage, reply, sendInteractive, patchMessage, patchSimple,
   saveBills, findEmployee, weeklySummary,
 } from './lark.js';
-import { buildBills, buildCard, htmlPage, editFormHtml, num, money } from './domain.js';
+import {
+  newState, mergeItem, assignItem, updateBill, deleteBill, materializeBills,
+  buildCard, buildResultCard, htmlPage, sortPageHtml, num, money,
+  parseExpenseText, attachItemToBill,
+} from './domain.js';
+
+const RX_NO_RECEIPT_BARE = /^(ไม่มี|ไม่|no|none)$/i;
+const RX_CANCEL_DRAFT    = /^(ยกเลิก|cancel|ทิ้ง)$/i;
 
 const RX_CONFIRM = /^(ยืนยัน|ยืนยน|บันทึก|save|confirm|y|yes|ok|โอเค|ใช่|ตกลง|1|👍|✅|✔️|🆗)$/i;
 const RX_DISCARD = /^(ทิ้ง|ยกเลิก|cancel|no|ไม่|x|❌|🗑️|0)$/i;
 const RX_EDIT    = /^(แก้|แก้ไข|edit|e|✏️|2)$/i;
+const DEBOUNCE_MS = 1800;   // รอรูปหยุดไหลกี่ ms ก่อนอัปเดตการ์ด
 
-// ── helpers: response ──
 const json = (o) => new Response(JSON.stringify(o), { headers: { 'Content-Type': 'application/json' } });
 const html = (s) => new Response(s, { headers: { 'Content-Type': 'text/html; charset=utf-8' } });
 const doStub = (env, openId) => env.SESSION.get(env.SESSION.idFromName(openId));
@@ -26,37 +36,66 @@ const doStub = (env, openId) => env.SESSION.get(env.SESSION.idFromName(openId));
 // ════════════════════════════════════════════════════════════════
 export default {
   async fetch(request, env, ctx) {
-    if (request.method === 'GET')  return handleGet(request, env);
+    if (request.method === 'GET')  return handleGet(request, env, ctx);
     if (request.method === 'POST') return handlePost(request, env, ctx);
-    return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v1' });
+    return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v2' });
   },
 };
 
-// ── ปุ่มในการ์ด (open_url → GET) ──
-async function handleGet(request, env) {
+// ── GET: ปุ่มในการ์ด (open_url) + หน้าเว็บจัดบิล + proxy รูป ──
+async function handleGet(request, env, ctx) {
   const url = new URL(request.url);
   const p = Object.fromEntries(url.searchParams);
   const act = p.act || '';
-  if (!act) return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v1', note: 'ส่งบิลในแชท Lark' });
+  if (!act) return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v2', note: 'ส่งบิลในแชท Lark' });
   const openId = p.u || '';
   if (!openId) return html(htmlPage('⚠️ ลิงก์ใช้ไม่ได้', 'ลิงก์ไม่ถูกต้อง'));
-  const out = await doStub(env, openId).handleButton(act, openId, p.k || '', p.name ?? null, p.amount ?? null);
-  return html(out);
+
+  if (act === 'img') {
+    const check = await doStub(env, openId).checkTokAndGetImage(openId, p.k || '', p.id || '');
+    if (!check.ok) return new Response('not found', { status: 404 });
+    try {
+      const buf = await downloadImage(env, p.id, check.imageKey);
+      return new Response(buf, { headers: { 'Content-Type': 'image/jpeg', 'Cache-Control': 'private, max-age=3600' } });
+    } catch (e) { return new Response('download failed', { status: 502 }); }
+  }
+
+  if (act === 'sort') {
+    const out = await doStub(env, openId).renderSortPage(openId, p.k || '', env.WORKER_URL);
+    return html(out);
+  }
+
+  const out = await doStub(env, openId).handleButton(act, openId, p.k || '');
+  if (out.needsFlush) ctx.waitUntil(doStub(env, openId).flush());
+  return html(out.page);
 }
 
+// ── POST: Lark webhook (event/card) + หน้าเว็บจัดบิล (assign/update/delete/confirm-web) ──
 async function handlePost(request, env, ctx) {
+  const url = new URL(request.url);
+  const act = url.searchParams.get('act');
+
+  // mutations จากหน้าเว็บจัดบิล
+  if (act) {
+    const openId = url.searchParams.get('u') || '';
+    const k = url.searchParams.get('k') || '';
+    let body = {};
+    try { body = await request.json(); } catch (e) {}
+    const res = await doStub(env, openId).webAction(act, openId, k, body);
+    if (res._flush) ctx.waitUntil(doStub(env, openId).flush());
+    return json(res);
+  }
+
   let body;
   try { body = await request.json(); } catch (e) { return json({ ok: true }); }
-
   if (body.type === 'url_verification') return json({ challenge: body.challenge });
 
-  // card action callback (path สำรอง — ปุ่มหลักใช้ open_url)
   if (body.action || (body.event && body.event.action)) {
-    const act = body.action || body.event.action || {};
-    const value = act.value || {};
+    const cardAct = body.action || body.event.action || {};
+    const value = cardAct.value || {};
     const openId = value.open_id;
     if (!openId) return json({ ok: true });
-    const res = await doStub(env, openId).cardAction(openId, value, act);
+    const res = await doStub(env, openId).cardAction(openId, value);
     if (res.flush) ctx.waitUntil(doStub(env, openId).flush());
     return json(res.toast || { ok: true });
   }
@@ -68,12 +107,12 @@ async function handlePost(request, env, ctx) {
       if (await env.KV.get('evt_' + evtId)) return json({ ok: true });
       await env.KV.put('evt_' + evtId, '1', { expirationTtl: 600 });
     }
-    ctx.waitUntil(handleMessage(body.event, env));   // ตอบ 200 ทันที งานหนักทำเบื้องหลัง
+    ctx.waitUntil(handleMessage(body.event, env));
   }
   return json({ ok: true });
 }
 
-// ── OCR อยู่ตรงนี้ (ขนานกันได้) → ค่อยส่งผลเข้า DO (serialize) ──
+// ── OCR (ขนานกันได้ทุกรูป) → ส่งผลเข้า DO (เรียงคิวเอง + debounce) ──
 async function handleMessage(event, env) {
   const msg = event.message;
   const openId = (event.sender && event.sender.sender_id && event.sender.sender_id.open_id) || '';
@@ -92,42 +131,60 @@ async function handleMessage(event, env) {
     const bytes = await downloadImage(env, msg.message_id, content.image_key);
     ocr = await claudeOCR(env, bytes);
   } catch (err) {
-    await reply(env, openId, '⚠️ อ่านรูปนี้ไม่ได้: ' + err.message);
+    await reply(env, openId, '⚠️ อ่านรูปนี้ไม่ได้ (' + (content.image_key || '?').slice(0, 8) + '...): ' + err.message);
     return;
   }
   await doStub(env, openId).processImage(openId, msg.message_id, content.image_key, ocr);
 }
 
 // ════════════════════════════════════════════════════════════════
-// SessionDO — state + serialize ต่อ openId
-// storage key เดียว: 'session' = { openId, stage[], grouped[], cardmsg, tok, tosave[] }
+// SessionDO
+// storage 'session' = { openId, state:{itemsById,bills,pool}, cardmsg, tok, tosave }
 // ════════════════════════════════════════════════════════════════
 export class SessionDO extends DurableObject {
-  async #load()  { return (await this.ctx.storage.get('session')) || {}; }
+  async #load()  {
+    const s = (await this.ctx.storage.get('session')) || {};
+    if (!s.state) s.state = newState();
+    return s;
+  }
   async #save(s) { await this.ctx.storage.put('session', s); }
   #tok(s)  { if (!s.tok) s.tok = crypto.randomUUID().replace(/-/g, '').substring(0, 12); return s.tok; }
   #opts(s) { return { tok: this.#tok(s), workerUrl: this.env.WORKER_URL }; }
+  #checkTok(s, k) { return !!s.tok && s.tok === k; }
 
-  // ── รับผล OCR ของรูป 1 ใบ ──
+  // ── รูปเข้ามาทีละใบ (เรียงคิวเองเพราะเป็น DO เดียว) → จับคู่สะสม + debounce card ──
   async processImage(openId, messageId, imageKey, ocr) {
     const s = await this.#load();
     s.openId = openId;
-    s.stage = s.stage || [];
-    s.stage.push({
-      message_id: messageId, image_key: imageKey,
+    const item = { message_id: messageId, image_key: imageKey,
       role: ocr.role, vendor: ocr.vendor, date: ocr.date, amount: ocr.amount,
       tax_id: ocr.tax_id, invoice_no: ocr.invoice_no,
-      pay_type: ocr.pay_type, ai_detail: ocr.ai_detail, confidence: ocr.confidence,
-    });
-    const bills = buildBills(s.stage);
-    s.grouped = bills;
-    const opts = this.#opts(s);   // ensure tok
-    await this.#save(s);
+      pay_type: ocr.pay_type, ai_detail: ocr.ai_detail, confidence: ocr.confidence };
 
-    if (s.cardmsg) {
-      await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'view', null, opts));
+    if (s.pendingText && s.pendingText.awaiting) {
+      // มีรายการที่พิมพ์ค้างรออยู่ (ถามว่ามีใบเสร็จไหม) — รูปนี้คือคำตอบ แนบเข้ารายการนั้นตรงๆ
+      attachItemToBill(s.state, s.pendingText.billId, item);
+      s.pendingText = null;
+      await this.#save(s);
+      await reply(this.env, openId, '📎 แนบรูปเข้ารายการที่พิมพ์ไว้แล้ว');
     } else {
-      const mId = await sendInteractive(this.env, openId, buildCard(openId, bills, 'view', null, opts));
+      mergeItem(s.state, item);
+      this.#opts(s); // ensure tok exists
+      await this.#save(s);
+    }
+    // debounce: setAlarm ซ้ำจะเลื่อนเวลาให้เอง (native) — รูปมาถี่ๆ การ์ดจะอัปเดตครั้งเดียวตอนหยุดไหล
+    await this.ctx.storage.setAlarm(Date.now() + DEBOUNCE_MS);
+  }
+
+  async alarm() {
+    const s = await this.#load();
+    if (!s.openId || !s.state.bills.length) return;
+    const opts = this.#opts(s);
+    const card = buildCard(s.openId, s.state, opts);
+    if (s.cardmsg) {
+      await patchMessage(this.env, s.cardmsg, card);
+    } else {
+      const mId = await sendInteractive(this.env, s.openId, card);
       if (mId) { s.cardmsg = mId; await this.#save(s); }
     }
   }
@@ -139,16 +196,42 @@ export class SessionDO extends DurableObject {
 
     if (t === 'id') { await reply(this.env, openId, 'open_id: ' + openId); return; }
 
-    if (s.grouped && s.grouped.length) {
-      const bills = s.grouped;
-      if (RX_CONFIRM.test(t)) {
-        s.tosave = s.grouped; s.grouped = [];
-        const opts = this.#opts(s);
+    // ── ตอบคำถาม "มีใบเสร็จไหม" ของรายการที่พิมพ์ไว้ก่อนหน้า ──
+    if (s.pendingText && s.pendingText.awaiting) {
+      const reExpense = parseExpenseText(t);
+      if (reExpense) { await this.#createPendingText(s, openId, reExpense); return; }
+      if (RX_CANCEL_DRAFT.test(t)) {
+        const bills = s.state.bills;
+        const idx = bills.findIndex(b => b.id === s.pendingText.billId);
+        if (idx >= 0) deleteBill(s.state, bills[idx].id);
+        s.pendingText = null;
         await this.#save(s);
-        if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'saving', null, opts));
-        await this.flush();
+        await reply(this.env, openId, 'ยกเลิกรายการที่พิมพ์ไว้แล้ว');
         return;
       }
+      if (RX_NO_RECEIPT_BARE.test(t)) {
+        await reply(this.env, openId, '📝 ขอเหตุผลด้วยนะ เช่น "ซื้อจากแผงลอยไม่มีบิล" หรือ "จ่ายเงินสดร้านไม่ออกใบเสร็จ"');
+        return;
+      }
+      // ข้อความอื่นๆ ถือเป็นเหตุผลที่ไม่มีใบเสร็จ
+      const bill = s.state.bills.find(b => b.id === s.pendingText.billId);
+      if (bill) { bill.no_receipt_reason = t.trim(); bill.warn = ''; }
+      s.pendingText = null;
+      const opts = this.#opts(s);
+      await this.#save(s);
+      if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, opts));
+      else { const mId = await sendInteractive(this.env, openId, buildCard(openId, s.state, opts)); if (mId) { s.cardmsg = mId; await this.#save(s); } }
+      await reply(this.env, openId, `📝 บันทึกเหตุผลแล้ว: "${t.trim()}"\nพิมพ์ \`y\` ยืนยัน หรือถ่ายบิลเพิ่มได้เลย`);
+      return;
+    }
+
+    // ── พิมพ์ยอดตรงๆ ไม่มีรูป เช่น "ค่ากาแฟ 65 บาท" → สร้างรายการรอ + ถามหาบิล ──
+    const parsed = parseExpenseText(t);
+    if (parsed) { await this.#createPendingText(s, openId, parsed); return; }
+
+    if (s.state.bills.length || s.state.pool.length) {
+      const bills = s.state.bills;
+      if (RX_CONFIRM.test(t)) { const r = await this.#prepareConfirm(s); if (r.ok) await this.flush(); else await reply(this.env, openId, r.error); return; }
       if (RX_DISCARD.test(t)) {
         if (s.cardmsg) await patchSimple(this.env, s.cardmsg, 'grey', '🗑️ ทิ้งบิลแล้ว');
         await this.ctx.storage.delete('session');
@@ -156,38 +239,116 @@ export class SessionDO extends DurableObject {
         return;
       }
       if (RX_EDIT.test(t)) {
-        await reply(this.env, openId, '✏️ พิมพ์แก้ได้เลย (ไม่ต้องพิมพ์ "แก้" ก่อนก็ได้):\n' +
-          '• `ค่า กาแฟลูกค้า` — แก้ชื่อรายการ\n' +
-          '• `ยอด 520` — แก้จำนวนเงิน\n\n(หมวดให้แอดมินแก้ในเว็บทีหลัง)\nเสร็จแล้วพิมพ์ `y` ยืนยัน');
+        const opts = this.#opts(s);
+        const link = opts.workerUrl + '?act=sort&u=' + encodeURIComponent(openId) + '&k=' + opts.tok;
+        const msg = bills.length > 1
+          ? `✏️ มี ${bills.length} บิล ต้องระบุเลขบิล:\n` +
+            '• `บิล 2 ยอด 520` — แก้ยอดบิลที่ 2\n' +
+            '• `บิล 2 ค่า กาแฟลูกค้า` — แก้ชื่อบิลที่ 2\n' +
+            '• `ทิ้งบิล 3` — ทิ้งแค่บิลที่ 3\n\n' +
+            `หรือดู/แก้แบบละเอียดทุกรูปที่: ${link}\n\nเสร็จแล้วพิมพ์ \`y\` ยืนยันทั้งหมด`
+          : '✏️ พิมพ์แก้ได้เลย:\n• `ค่า กาแฟลูกค้า` — แก้ชื่อรายการ\n• `ยอด 520` — แก้จำนวนเงิน\n\nเสร็จแล้วพิมพ์ `y` ยืนยัน';
+        await reply(this.env, openId, msg);
         return;
       }
+      if (await this.#discardOneBill(s, t, openId)) return;
       if (await this.#applyTextEdit(s, t, openId)) return;
     }
 
     if (/^(รายการ|ยอดสะสม|ค้างเบิก)$/.test(t)) { await weeklySummary(this.env, openId); return; }
-    await reply(this.env, openId, '📸 ถ่ายบิลส่งเป็นชุด (สลิป + ใบเสร็จ + รูป)\nการ์ดจะเด้งให้ตรวจทันทีหลังอ่านรูป\nพิมพ์ "รายการ" = ดูยอดที่เบิกแล้วอาทิตย์นี้');
+    await reply(this.env, openId, '📸 ถ่ายบิลส่งเป็นชุดได้เลย (กี่ใบก็ได้) การ์ดจะเด้งให้ตรวจหลังรูปหยุดไหล\nพิมพ์ "รายการ" = ดูยอดที่เบิกแล้วอาทิตย์นี้');
+  }
+
+  // ── พิมพ์ "ค่ากาแฟ 65 บาท" → สร้างบิลร่างจากข้อความ (amount+ชื่อ+หมวดเดา) แล้วถามหาบิล ──
+  async #createPendingText(s, openId, parsed) {
+    // ถ้ามีรายการพิมพ์ค้างไม่ตอบอยู่ก่อน แล้วพิมพ์ยอดใหม่มา = เปลี่ยนใจ ลบตัวเก่าทิ้ง
+    if (s.pendingText && s.pendingText.awaiting) {
+      const old = s.state.bills.find(b => b.id === s.pendingText.billId);
+      if (old) deleteBill(s.state, old.id);
+    }
+    const virtualId = 'txt_' + crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+    s.state.itemsById[virtualId] = { message_id: virtualId, image_key: null, role: 'MANUAL',
+      amount: parsed.amount, vendor: null, tax_id: null, invoice_no: null,
+      ai_detail: parsed.ai_detail, pay_type: null, confidence: null };
+    const r = assignItem(s.state, virtualId, 'new');
+    const bill = s.state.bills.find(b => b.id === r.billId);
+    bill.warn = '⏳ รอตอบ: มีใบเสร็จไหม?';
+    s.pendingText = { billId: r.billId, awaiting: true };
+    const opts = this.#opts(s);
+    await this.#save(s);
+    if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, opts));
+    else { const mId = await sendInteractive(this.env, openId, buildCard(openId, s.state, opts)); if (mId) { s.cardmsg = mId; await this.#save(s); } }
+    await reply(this.env, openId,
+      `บันทึกไว้ก่อน: ${parsed.ai_detail} ${money(parsed.amount)} บาท${bill.category ? ' (' + bill.category + ')' : ''}\n` +
+      '📸 มีใบเสร็จ/สลิปไหม? ถ่ายส่งมาได้เลย\n' +
+      'ถ้าไม่มี พิมพ์เหตุผลสั้นๆ เช่น "ซื้อจากแผงลอยไม่มีบิล" (พิมพ์ "ยกเลิก" ถ้าไม่เอารายการนี้)');
   }
 
   async #applyTextEdit(s, text, openId) {
-    if (!s.grouped || !s.grouped.length) return false;
-    const b = s.grouped[0]; let done = ''; let m;
-    if ((m = text.match(/^ยอด\s*([\d,\.]+)/)))                                  { b.amount = num(m[1]); done += 'ยอด '; }
-    if ((m = text.match(/^(?:ชื่อ|รายการ|รายละเอียด|ค่า)\s*(.+)/)))            { b.ai_detail = m[1].trim(); done += 'ชื่อรายการ '; }
+    const bills = s.state.bills;
+    if (!bills.length) return false;
+    let idx = 0; let rest = text;
+    const billRef = text.match(/^บิล\s*(\d+)\s+(.+)/);
+    if (billRef) {
+      idx = parseInt(billRef[1], 10) - 1; rest = billRef[2];
+      if (idx < 0 || idx >= bills.length) {
+        await reply(this.env, openId, `⚠️ ไม่มีบิลที่ ${billRef[1]} (มีทั้งหมด ${bills.length} บิล)`);
+        return true;
+      }
+    } else if (bills.length > 1) {
+      if (/^(ยอด\s*[\d,\.]+|(?:ชื่อ|รายการ|รายละเอียด|ค่า)\s*.+)$/.test(text)) {
+        await reply(this.env, openId, `⚠️ มี ${bills.length} บิล ต้องระบุเลขบิลด้วย เช่น \`บิล 1 ${text}\``);
+        return true;
+      }
+      return false;
+    }
+    const b = bills[idx]; let done = ''; let m;
+    if ((m = rest.match(/^ยอด\s*([\d,\.]+)/)))                       { b.amount = num(m[1]); done += 'ยอด '; }
+    if ((m = rest.match(/^(?:ชื่อ|รายการ|รายละเอียด|ค่า)\s*(.+)/))) { b.ai_detail = m[1].trim(); done += 'ชื่อรายการ '; }
     if (!done) return false;
     const opts = this.#opts(s);
     await this.#save(s);
-    if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.grouped, 'view', null, opts));
-    await reply(this.env, openId, `✏️ แก้ ${done.trim()} แล้ว — พิมพ์ \`y\` เพื่อยืนยัน`);
+    if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, opts));
+    const tag = bills.length > 1 ? `บิล ${idx + 1} ` : '';
+    await reply(this.env, openId, `✏️ แก้ ${tag}${done.trim()} แล้ว — พิมพ์ \`y\` เพื่อยืนยันทั้งหมด`);
     return true;
   }
 
-  // ── งานหนัก: อัปโหลดรูป + เขียน record + แจ้งผล (เรียกจาก confirm) ──
+  async #discardOneBill(s, text, openId) {
+    const m = text.match(/^ทิ้งบิล\s*(\d+)/);
+    if (!m) return false;
+    const bills = s.state.bills;
+    const idx = parseInt(m[1], 10) - 1;
+    if (idx < 0 || idx >= bills.length) {
+      await reply(this.env, openId, `⚠️ ไม่มีบิลที่ ${m[1]} (มีทั้งหมด ${bills.length} บิล)`);
+      return true;
+    }
+    deleteBill(s.state, bills[idx].id);
+    const opts = this.#opts(s);
+    await this.#save(s);
+    if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, opts));
+    await reply(this.env, openId, `🗑️ ทิ้งบิล ${m[1]} แล้ว (รูปย้ายไปกองพัก) เหลือ ${s.state.bills.length} บิล — พิมพ์ \`y\` ยืนยันที่เหลือ`);
+    return true;
+  }
+
+  // ── เตรียมบันทึก (เร็ว: materialize + เปลี่ยนการ์ดเป็น saving) — ไม่รอ upload/เขียน record จริง ──
+  // ผู้เรียกต้องสั่ง flush() ต่อเอง (ผ่าน ctx.waitUntil ถ้าเรียกจาก HTTP boundary กันรอนาน)
+  async #prepareConfirm(s) {
+    const bills = s.state.bills;
+    if (!bills.length) return { ok: false, error: 'ยังไม่มีรายการให้บันทึก' };
+    const materialized = materializeBills(s.state);
+    s.tosave = materialized;
+    await this.#save(s);
+    if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildResultCard('saving', materialized));
+    return { ok: true, count: materialized.length };
+  }
+
   async flush() {
     const s = await this.#load();
-    const bills = s.tosave || [];
-    if (!bills.length) return;
+    const materialized = s.tosave || [];
+    if (!materialized.length) return;
     const openId = s.openId;
-    s.tosave = [];
+    s.tosave = null;
     await this.#save(s);
 
     const emp = await findEmployee(this.env, openId);
@@ -195,101 +356,115 @@ export class SessionDO extends DurableObject {
       await reply(this.env, openId, '⚠️ ยังไม่ได้ลงทะเบียนพนักงาน\nพิมพ์ "id" เอา open_id ไปใส่คอลัมน์ "Lark open_id" ในตารางพนักงานก่อน แล้วส่งบิลใหม่');
       return;
     }
-    const refs = await saveBills(this.env, emp, bills);
-    const opts = this.#opts(s);
-    if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'done', refs, opts));
-
-    // ล้าง session (จบรอบ)
+    const refs = await saveBills(this.env, emp, materialized);
+    if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildResultCard('done', materialized, refs));
     await this.ctx.storage.delete('session');
-    await reply(this.env, openId, '✅ บันทึกแล้ว:\n' +
-      bills.map((b, i) => `${refs[i]} · ${b.category || '-'} · ${money(b.amount)} บ.`).join('\n') +
+    await reply(this.env, openId, `✅ บันทึกแล้ว ${materialized.length} รายการ:\n` +
+      materialized.map((b, i) => `${refs[i]} · ${b.category || '-'} · ${money(b.amount)} บ.`).join('\n') +
       '\n\nพิมพ์ "รายการ" ดูยอดสะสมอาทิตย์นี้');
   }
 
-  // ── ปุ่ม open_url (GET) ──
-  async handleButton(act, openId, k, name, amount) {
+  // ── ปุ่ม open_url (GET): confirm / discard — คืน {page, needsFlush} เสมอ ──
+  async handleButton(act, openId, k) {
     const s = await this.#load();
     s.openId = openId;
-    const bills = s.grouped || [];
+    if (!this.#checkTok(s, k)) return { page: htmlPage('⚠️ ลิงก์ใช้ไม่ได้', 'บิลนี้จัดการไปแล้ว หรือลิงก์หมดอายุ\nถ่ายบิลใหม่ส่งในแชทได้เลย') };
 
-    // ตรวจ session token
-    if (act !== 'confirm' && act !== 'discard' && act !== 'editform' && act !== 'editmenu' && act !== 'saveedit')
-      return htmlPage('⚠️ ลิงก์ใช้ไม่ได้', 'act ไม่รู้จัก');
-    if (!s.tok || s.tok !== k)
-      return htmlPage('⚠️ ลิงก์ใช้ไม่ได้', 'บิลนี้จัดการไปแล้ว หรือลิงก์หมดอายุ\nถ่ายบิลใหม่ส่งในแชทได้เลย');
-
-    // ── ยืนยัน → เซฟเข้า Lark เลย (หน้าเว็บรอได้ ไม่มี limit 3 วิ) ──
     if (act === 'confirm') {
-      if (!bills.length) return htmlPage('บันทึกไปแล้ว', 'บิลนี้ถูกบันทึก/ยกเลิกไปแล้ว');
-      const emp = await findEmployee(this.env, openId);
-      if (!emp) {
-        await reply(this.env, openId, '⚠️ ยังไม่ได้ลงทะเบียนพนักงาน\nพิมพ์ "id" เอา open_id ไปใส่คอลัมน์ "Lark open_id" ในตารางพนักงานก่อน');
-        return htmlPage('ยังไม่ลงทะเบียน', 'พิมพ์ "id" ในแชท แล้วเอา open_id ไปใส่ตารางพนักงานก่อน');
-      }
-      const opts = this.#opts(s);
-      if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'saving', null, opts));
-      const refs = await saveBills(this.env, emp, bills);
-      if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'done', refs, opts));
-      await this.ctx.storage.delete('session');
-      const sum = bills.reduce((a, b) => a + (b.amount || 0), 0);
-      await reply(this.env, openId, '✅ บันทึกแล้ว:\n' +
-        bills.map((b, i) => `${refs[i]} · ${b.category || '-'} · ${money(b.amount)} บ.`).join('\n') +
-        '\n\nพิมพ์ "รายการ" ดูยอดสะสมอาทิตย์นี้');
-      return htmlPage('✅ บันทึกเข้าระบบแล้ว',
-        bills.map((b, i) => refs[i] + ' · ' + money(b.amount) + ' บ.').join('\n') +
-        '\n━━━━━━━━━\nรวม ' + money(sum) + ' บาท\nสถานะ: รอตั้งเบิก');
+      const r = await this.#prepareConfirm(s);
+      if (!r.ok) return { page: htmlPage('ยังไม่มีรายการ', 'ถ่ายบิลใหม่ส่งในแชทได้เลย') };
+      return { needsFlush: true, page: htmlPage('⏳ กำลังบันทึก...',
+        `กำลังบันทึก ${r.count} รายการเข้าระบบ (~${Math.ceil(r.count * 1.5)} วิ)\nเสร็จแล้วจะมีข้อความแจ้งในแชท`) };
     }
-
     if (act === 'discard') {
       if (s.cardmsg) await patchSimple(this.env, s.cardmsg, 'grey', '🗑️ ทิ้งบิลแล้ว');
       await this.ctx.storage.delete('session');
       await reply(this.env, openId, '🗑️ ทิ้งบิลแล้ว — ถ่ายใหม่ส่งได้เลย');
-      return htmlPage('🗑️ ทิ้งแล้ว', 'ถ่ายบิลใหม่ส่งในแชทได้เลย');
+      return { page: htmlPage('🗑️ ทิ้งแล้ว', 'ถ่ายบิลใหม่ส่งในแชทได้เลย') };
     }
-
-    if (act === 'editform' || act === 'editmenu') {
-      if (!bills.length) return htmlPage('บิลนี้จบแล้ว', 'ถ่ายบิลใหม่ส่งในแชทได้เลย');
-      return editFormHtml(openId, s.tok, bills[0], this.env.WORKER_URL);
-    }
-
-    if (act === 'saveedit') {
-      if (bills[0]) {
-        if (name != null && name !== '') bills[0].ai_detail = String(name).trim();
-        const amt = num(amount);
-        if (amt != null) bills[0].amount = amt;
-        const opts = this.#opts(s);
-        await this.#save(s);
-        if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'view', null, opts));
-      }
-      return htmlPage('✅ แก้ไขเรียบร้อย',
-        'ชื่อรายการ: ' + (name || '-') + '\nยอดเงิน: ' + money(num(amount)) + ' บาท\n\n👉 กลับไปแชท แล้วกด ✅ ยืนยัน เพื่อบันทึกเข้าระบบ');
-    }
-
-    return htmlPage('⚠️', 'ไม่มี handler');
+    return { page: htmlPage('⚠️', 'ไม่มี handler') };
   }
 
-  // ── card action callback (path สำรอง) ──
-  async cardAction(openId, value, act) {
+
+  // ── รูป proxy: เช็ก tok แล้วคืน image_key ให้ top-level fetch ไปโหลดจาก Lark ──
+  async checkTokAndGetImage(openId, k, msgId) {
+    const s = await this.#load();
+    if (!this.#checkTok(s, k)) return { ok: false };
+    const item = s.state.itemsById[msgId];
+    if (!item) return { ok: false };
+    return { ok: true, imageKey: item.image_key };
+  }
+
+  // ── หน้าเว็บจัดบิล ──
+  async renderSortPage(openId, k, workerUrl) {
     const s = await this.#load();
     s.openId = openId;
-    const bills = s.grouped || [];
     const opts = this.#opts(s);
+    if (k !== opts.tok) { await this.#save(s); return htmlPage('⚠️ ลิงก์ใช้ไม่ได้', 'ลิงก์หมดอายุ กลับไปกดปุ่มใหม่ในแชท'); }
+    await this.#save(s);
+    return sortPageHtml(openId, opts.tok, workerUrl, s.state);
+  }
 
+  // ── mutations จากหน้าเว็บจัดบิล ──
+  async webAction(act, openId, k, body) {
+    const s = await this.#load();
+    s.openId = openId;
+    if (!this.#checkTok(s, k)) return { ok: false, error: 'ลิงก์หมดอายุ' };
+
+    if (act === 'state') {
+      const itemsMeta = {};
+      Object.keys(s.state.itemsById).forEach(id => {
+        const it = s.state.itemsById[id];
+        itemsMeta[id] = { role: it.role, amount: it.amount, vendor: it.vendor };
+      });
+      return { ok: true,
+        bills: s.state.bills.map(b => ({ id: b.id, amount: b.amount, category: b.category, ai_detail: b.ai_detail, warn: b.warn, memberIds: b.memberIds })),
+        pool: s.state.pool, itemsMeta };
+    }
+    if (act === 'assign') {
+      const r = assignItem(s.state, body.msgId, body.target);
+      if (r.ok) await this.#save(s);
+      if (r.ok && s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, this.#opts(s)));
+      return r;
+    }
+    if (act === 'update') {
+      const r = updateBill(s.state, body.billId, body.patch || {});
+      if (r.ok) await this.#save(s);
+      if (r.ok && s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, this.#opts(s)));
+      return r;
+    }
+    if (act === 'delete') {
+      const r = deleteBill(s.state, body.billId);
+      if (r.ok) await this.#save(s);
+      if (r.ok && s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, this.#opts(s)));
+      return r;
+    }
+    if (act === 'newblank') {
+      const id = 'blank_' + crypto.randomUUID().replace(/-/g, '').slice(0, 8);
+      s.state.itemsById[id] = { message_id: id, image_key: null, role: 'RECEIPT', amount: null, vendor: null, tax_id: null, ai_detail: '', pay_type: null };
+      const r = assignItem(s.state, id, 'new');
+      await this.#save(s);
+      return r;
+    }
+    if (act === 'confirm-web') {
+      const r = await this.#prepareConfirm(s);
+      return r.ok ? { ok: true, count: r.count, _flush: true } : r;
+    }
+    return { ok: false, error: 'ไม่รู้จักคำสั่งนี้' };
+  }
+
+  // ── card action callback (path สำรอง — ปุ่มหลักใช้ open_url) ──
+  async cardAction(openId, value) {
+    const s = await this.#load();
+    s.openId = openId;
     if (value.action === 'discard') {
       if (s.cardmsg) await patchSimple(this.env, s.cardmsg, 'grey', '🗑️ ทิ้งบิลแล้ว');
       await this.ctx.storage.delete('session');
       return { toast: { toast: { type: 'success', content: 'ทิ้งบิลแล้ว' } } };
     }
-    if (value.action === 'edit') {
-      if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'edit', null, opts));
-      await this.#save(s);
-      return { toast: { toast: { type: 'success', content: 'เปิดโหมดแก้ไข ✏️' } } };
-    }
     if (value.action === 'confirm') {
-      if (!bills.length) return { toast: { toast: { type: 'success', content: 'บิลนี้บันทึกไปแล้ว' } } };
-      s.tosave = bills; s.grouped = [];
-      await this.#save(s);
-      if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, bills, 'saving', null, opts));
+      const r = await this.#prepareConfirm(s);
+      if (!r.ok) return { toast: { toast: { type: 'success', content: 'ยังไม่มีรายการ' } } };
       return { toast: { toast: { type: 'success', content: '⏳ กำลังบันทึก...' } }, flush: true };
     }
     return { toast: { ok: true } };

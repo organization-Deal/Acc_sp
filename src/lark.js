@@ -166,7 +166,10 @@ export async function saveBills(env, emp, bills) {
     if (att.tax.length)      f[CFG.F.ATT_TAX]      = att.tax;
     if (att.evidence.length) f[CFG.F.ATT_EVIDENCE] = att.evidence;
     f[CFG.F.NO_RECEIPT] = true;
-    if (b.mismatch) f[CFG.F.NOTE] = `⚠️ ยอดใบเสร็จ ${money(b.amount)} ≠ ยอดจ่าย ${money(b.pay_amount)} (OCR ${b.anchor.confidence || 0}%)`;
+    const noteParts = [];
+    if (b.mismatch) noteParts.push(`⚠️ ยอดใบเสร็จ ${money(b.amount)} ≠ ยอดจ่าย ${money(b.pay_amount)} (OCR ${b.anchor.confidence || 0}%)`);
+    if (b.no_receipt_reason) noteParts.push(`📝 ไม่มีใบเสร็จ: ${b.no_receipt_reason}`);
+    if (noteParts.length) f[CFG.F.NOTE] = noteParts.join(' | ');
 
     const r = await larkPost(env, `/open-apis/bitable/v1/apps/${CFG.BASE_TOKEN}/tables/${CFG.T_EXPENSE}/records`, { fields: f });
     let ref = '(เลขกำลังสร้าง)';

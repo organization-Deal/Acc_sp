@@ -9,7 +9,7 @@ compatibility_date = "2025-01-01"
 # ⚠️ ตั้งค่านี้หลัง deploy ครั้งแรก (เอา URL ที่ wrangler พ่นออกมา มาใส่)
 #    ใช้ทำลิงก์ปุ่มในการ์ด (open_url → GET กลับมาที่ Worker ตัวเอง)
 [vars]
-WORKER_URL = "https://receiptbot.CHANGE-ME.workers.dev"
+WORKER_URL = "https://accoutingsuppor02.organization-23c.workers.dev"
 
 # KV: เก็บ dedup event_id, cache lark token + employee record
 [[kv_namespaces]]

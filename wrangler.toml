@@ -1,0 +1,19 @@
+name = "accsp2026"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+[vars]
+WORKER_URL = "https://accsp2026.organization-23c.workers.dev"
+ACCOUNTING_OPENIDS = "ou_d1265794fc40ed011b129297f1c3b5cf,ou_1115bdbe32d7c63b42b613af65e4b232"
+
+[[kv_namespaces]]
+binding = "KV"
+id = "f88be6b95e48467ebbc031f556f96b0f"
+
+[[durable_objects.bindings]]
+name = "SESSION"
+class_name = "SessionDO"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["SessionDO"]

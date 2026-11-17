@@ -67,9 +67,6 @@ export async function people(env){
  const rows=await list(env,CFG.T_EMPLOYEE),out={};
  for(const role of ['not','may']){const matches=rows.filter(r=>textOf(r.fields['Name (TH)'])===NAMES[role]);if(matches.length!==1)throw Error('ทะเบียน '+role+' ไม่ตรงหนึ่งคน');out[role]=textOf(matches[0].fields['Lark open_id']);if(!/^ou_[a-z0-9]+$/.test(out[role]))throw Error('ไม่พบ Lark open_id ของ '+role);}
  if(out.not===out.may)throw Error('ผู้ตรวจและผู้อนุมัติต้องเป็นคนละคน');
- const matches=rows.filter(r=>textOf(r.fields['Name (TH)'])==='สิริวรัญญา ฮังคำ');
- const id=matches.length===1?textOf(matches[0].fields['Lark open_id']):'';
- out.accounting=/^ou_[a-z0-9]+$/.test(id)&&id!==out.not&&id!==out.may?id:null;
  return out;
 }
 const plain=content=>({tag:'plain_text',content});
@@ -95,12 +92,34 @@ function transferCard(rows,test,portal){
 }
 async function send(env,to,c,uuid){const d=await api(env,'im/v1/messages?receive_id_type=open_id','POST',{receive_id:to,msg_type:'interactive',content:JSON.stringify(c),uuid:uuid.slice(0,50)});if(!d.message_id)throw Error('No message_id');return d.message_id;}
 async function patch(env,id,c){return api(env,'im/v1/messages/'+encodeURIComponent(id),'PATCH',{content:JSON.stringify(c)});}
+export const TABLE_REQUEST='ส่งให้นอต (คำสั่งจากตาราง)';
+export function tableReviewProblem(r,j){
+ const f=r.fields||{};
+ if(f.Approve===true||j?.state==='APPROVED'||f['รายการสำเร็จ']===true||f['จ่ายแล้ว (PEAK)']===true)return 'อนุมัติหรือจ่ายแล้ว ไม่ส่งซ้ำ';
+ if(textOf(f['สถานะ'])!=='สร้างแล้ว'||!['COMPLETE','CREATED','READY','DONE','COMPLETED'].includes(j?.state))return 'ยังไม่พร้อมตรวจ กรุณาสร้างเอกสารให้ครบ';
+ return financeProblem(f,j,r.record_id);
+}
+export async function tableReview(env,x){
+ // The button uses Bitable edit permissions, not a public approval URL.
+ x.r=(await api(env,recordsPath(SUMMARY)+'/'+x.r.record_id)).record;
+ if(x.r.fields[TABLE_REQUEST]!==true)return;
+ const problem=tableReviewProblem(x.r,x.j);
+ const fields={[TABLE_REQUEST]:false};
+ if(problem)fields['ผลตรวจบัญชี (ระบบ)']=problem;
+ else {
+  const hash=await fingerprint(x.r,x.j);
+  if(x.r.fields['บัญชีตรวจผ่าน']===true&&textOf(x.r.fields['ข้อมูลที่บัญชีตรวจผ่าน'])===hash&&!x.r.fields['ส่งกลับแก้ไขก่อนอนุมัติ'])fields['ผลตรวจบัญชี (ระบบ)']='ส่งให้นอตแล้ว ไม่ส่งซ้ำ';
+  else Object.assign(fields,{'บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'ตรวจผ่านจากปุ่มในตารางสรุปรอบเบิก','เวลาบัญชีตรวจผ่าน':Date.now(),'ข้อมูลที่บัญชีตรวจผ่าน':hash,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','ผู้ตรวจสอบก่อนอนุมัติ':'','เวลานอตตรวจผ่าน':null,'ส่งกลับแก้ไขก่อนอนุมัติ':false,Reject:false,'ผลตรวจบัญชี (ระบบ)':'บัญชีตรวจผ่าน • รอนอตตรวจ'});
+ }
+ await api(env,recordsPath(SUMMARY)+'/'+x.r.record_id,'PUT',{fields});
+ Object.assign(x.r.fields,fields);
+}
 // Single coordinator DO serializes polling and callbacks; receipt sessions use other names.
 export async function financeTick(owner){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true')return {disabled:true};
  if(!env.LARK_VERIFICATION_TOKEN)throw Error('Missing callback verification setting');
  const [all,recipients]=await Promise.all([snapshot(env),people(env)]);const groups={accounting:[],not:[],may:[],transfer:[],test:[]};
- for(const x of all){const stage=await checkedStage(x.r,x.j);if(groups[stage])groups[stage].push(x);}
+ for(const x of all){if(x.r.fields[TABLE_REQUEST]===true)await tableReview(env,x);const stage=await checkedStage(x.r,x.j);if(stage!=='accounting'&&groups[stage])groups[stage].push(x);}
  if(env.FINANCE_TEST_ONLY==='true'){groups.accounting=[];groups.not=[];groups.may=[];groups.transfer=[];}
  let sends=0;
  for(const stage of Object.keys(groups)){
@@ -129,7 +148,7 @@ export async function financeCallback(owner,b){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true'||!verifiedCallback(env,b))throw Error('Unauthorized callback');
  const v=b.event?.action?.value||{},actor=b.event?.operator?.open_id;
  const key=await ctx.storage.get('nonce:'+v.nonce),saved=key&&await ctx.storage.get(key);
- if(!saved||saved.retired||saved.recipient!==actor||!['accounting','not','may'].includes(saved.stage)||Date.now()-saved.created>7*86400000)return {ignored:true};
+ if(!saved||saved.retired||saved.recipient!==actor||!['not','may'].includes(saved.stage)||Date.now()-saved.created>7*86400000)return {ignored:true};
  if(!['accept','accept-all','return'].includes(v.action))return {ignored:true};
  const targets=saved.signatures.filter(x=>v.action==='accept-all'||x[0]===v.id);if(!targets.length)return {ignored:true};
  const recipients=await people(env);if(actor!==recipients[saved.stage])return {ignored:true};

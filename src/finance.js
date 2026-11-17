@@ -97,7 +97,7 @@ export async function financeTick(owner){
    if(saved?.sent)continue;if(sends>=4)continue;
    if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:stage==='may'?recipients.may:recipients.not};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
    const c=stage==='not'||stage==='may'?reviewCard(stage,chunk,saved.nonce):transferCard(chunk,stage==='test');
-   saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;await ctx.storage.put(key,saved);sends++;
+   saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;await ctx.storage.put(key,saved);console.log('FINANCE_CARD_SENT',stage,chunk.length,saved.message);sends++;
   }
   const old=await ctx.storage.get('active:'+stage)||[];
   // Retire only after replacements have all been sent.
@@ -106,6 +106,7 @@ export async function financeTick(owner){
    await ctx.storage.put('active:'+stage,active);}
  }
  await ctx.storage.put('lastPoll',{at:Date.now(),counts:Object.fromEntries(Object.entries(groups).map(([k,v])=>[k,v.length])),sends});
+ console.log('FINANCE_POLL',JSON.stringify({counts:Object.fromEntries(Object.entries(groups).map(([k,v])=>[k,v.length])),sends}));
  return {ok:true,sends};
 }
 export function verifiedCallback(env,b){return !!env.LARK_VERIFICATION_TOKEN&&b?.header?.token===env.LARK_VERIFICATION_TOKEN&&b.header.app_id===CFG.LARK_APP_ID&&b.header.event_type==='card.action.trigger';}

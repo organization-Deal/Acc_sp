@@ -1,3 +1,4 @@
+import {financeTick,financeCallback,verifiedCallback} from './finance.js';
 import {validateBills} from './validation.js';
 import { companyOf, companyError } from './companies.js';
 // ════════════════════════════════════════════════════════════════
@@ -44,6 +45,9 @@ const doStub = (env, openId) => env.SESSION.get(env.SESSION.idFromName(openId));
 
 // ════════════════════════════════════════════════════════════════
 export default {
+  async scheduled(event,env,ctx) {
+    if(env.FINANCE_ENABLED === 'true') ctx.waitUntil(doStub(env,'finance-coordinator-v1').financePoll());
+  },
   async fetch(request, env, ctx) {
     if (request.method === 'GET')  return handleGet(request, env, ctx);
     if (request.method === 'POST') return handlePost(request, env, ctx);
@@ -122,6 +126,11 @@ async function handlePost(request, env, ctx) {
 
   let body;
   try { body = await request.json(); } catch (e) { return json({ ok: true }); }
+  if (body.event?.action?.value?.finance === true) {
+    if (env.FINANCE_ENABLED !== 'true' || !verifiedCallback(env,body)) return new Response('Unauthorized',{status:403});
+    ctx.waitUntil(doStub(env,'finance-coordinator-v1').financeDecide(body));
+    return json({toast:{type:'info',content:'กำลังตรวจและบันทึกผล โปรดรอข้อความผลจากผู้ช่วยบัญชี'}});
+  }
   if (body.type === 'url_verification') return json({ challenge: body.challenge });
 
   if (body.action || (body.event && body.event.action)) {
@@ -204,6 +213,9 @@ async function handleMessage(event, env) {
 // storage 'session' = { openId, state:{itemsById,bills,pool}, cardmsg, tok, tosave }
 // ════════════════════════════════════════════════════════════════
 export class SessionDO extends DurableObject {
+  async financePoll() { return this.ctx.blockConcurrencyWhile(()=>financeTick(this)); }
+  async financeDecide(body) { return this.ctx.blockConcurrencyWhile(()=>financeCallback(this,body)); }
+
   async #load()  {
     const s = (await this.ctx.storage.get('session')) || {};
     if (!s.state) s.state = newState();

@@ -35,12 +35,22 @@ export function financeStage(r,j){
  }
  if(status!=='สร้างแล้ว'||f.Approve===true||j.state==='APPROVED')return 'waiting';
  if(!['COMPLETE','CREATED','READY','DONE','COMPLETED'].includes(j.state))return 'waiting';
+ if(f['บัญชีตรวจผ่าน']!==true||!textOf(f['ผู้ตรวจบัญชี'])||!f['เวลาบัญชีตรวจผ่าน']||!textOf(f['ข้อมูลที่บัญชีตรวจผ่าน']))return 'accounting';
  if(f['นอตตรวจผ่าน']!==true)return 'not';
  return textOf(f['ผู้ตรวจสอบก่อนอนุมัติ'])&&f['เวลานอตตรวจผ่าน']?'may':'blocked';
 }
 export async function fingerprint(r,j){
  const f=r.fields;return digest([r.record_id,j.key,j.docId,j.pdfUrl,j.company,j.employee,j.currency,j.items,j.refs,
  ...['ยอดรวม','จำนวนรายการ','บริษัท','รหัสบริษัท','ชื่อพนักงาน','ชื่อบัญชี','เลขบัญชี','ธนาคาร','Doc ID','เลขใบขอเบิก','รายการต้นทาง JSON','สรุปค่าใช้จ่าย','ข้อมูลบริษัท ณ วันออกเอกสาร'].map(k=>f[k]??null)]);
+}
+// Every transition rechecks the exact financial data reviewed at the previous step.
+export async function checkedStage(r,j){
+ const stage=financeStage(r,j);
+ if(!['not','may'].includes(stage))return stage;
+ const hash=await fingerprint(r,j);
+ if(textOf(r.fields['ข้อมูลที่บัญชีตรวจผ่าน'])!==hash)return 'accounting';
+ if(stage==='may'&&textOf(r.fields['ข้อมูลที่นอตตรวจผ่าน'])!==hash)return 'not';
+ return stage;
 }
 export async function api(env,path,method='GET',body){
  const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
@@ -56,7 +66,11 @@ export async function snapshot(env){
 export async function people(env){
  const rows=await list(env,CFG.T_EMPLOYEE),out={};
  for(const role of ['not','may']){const matches=rows.filter(r=>textOf(r.fields['Name (TH)'])===NAMES[role]);if(matches.length!==1)throw Error('ทะเบียน '+role+' ไม่ตรงหนึ่งคน');out[role]=textOf(matches[0].fields['Lark open_id']);if(!/^ou_[a-z0-9]+$/.test(out[role]))throw Error('ไม่พบ Lark open_id ของ '+role);}
- if(out.not===out.may)throw Error('ผู้ตรวจและผู้อนุมัติต้องเป็นคนละคน');return out;
+ if(out.not===out.may)throw Error('ผู้ตรวจและผู้อนุมัติต้องเป็นคนละคน');
+ const matches=rows.filter(r=>textOf(r.fields['Name (TH)'])==='สิริวรัญญา ฮังคำ');
+ const id=matches.length===1?textOf(matches[0].fields['Lark open_id']):'';
+ out.accounting=/^ou_[a-z0-9]+$/.test(id)&&id!==out.not&&id!==out.may?id:null;
+ return out;
 }
 const plain=content=>({tag:'plain_text',content});
 const paragraph=content=>({tag:'div',text:{tag:'lark_md',content}});
@@ -64,10 +78,10 @@ const button=(label,value,url)=>({tag:'button',text:plain(label),...(url?{url}:{
 const card=(title,elements,template='blue')=>({config:{wide_screen_mode:true},header:{template,title:plain(title)},elements});
 function rowText(x){const f=x.r.fields;return '**'+md(f['เลขใบขอเบิก'])+' • '+md(x.j.company.name)+'**\n'+md(f['ชื่อพนักงาน'])+' • '+x.j.items.length+' บิล • **'+money(f['ยอดรวม'])+' '+md(x.j.currency)+'**\n[ดู PDF]('+linkOf(f['ใบขอเบิก PDF'])+') | [เปิดรายการ]('+SUMMARY_URL+'&record='+x.r.record_id+')';}
 function reviewCard(stage,rows,nonce){
- const elements=[paragraph('ตรวจเอกสารก่อนกด • ปุ่มใช้ได้เฉพาะ'+(stage==='not'?'นอต':'เมย์')+'\n'+rows.length+' ใบสรุป แยกบริษัท • ไม่ใช่การยืนยันโอนเงิน')];
- for(const x of rows){elements.push(paragraph(rowText(x)),{tag:'action',actions:[button(stage==='not'?'ตรวจผ่าน':'Approve',{finance:true,nonce,action:'accept',id:x.r.record_id}),button('ส่งกลับแก้ไข',{finance:true,nonce,action:'return',id:x.r.record_id})]});}
- elements.push({tag:'action',actions:[{...button(stage==='not'?'ตรวจผ่านทั้งหมดในชุดนี้':'Approve ทั้งหมดในชุดนี้',{finance:true,nonce,action:'accept-all'}),type:'primary',confirm:{title:plain('ยืนยัน '+rows.length+' ใบสรุป'),text:plain('ตรวจเอกสารและยอดครบทุกบริษัทแล้วใช่ไหม')}}]});
- return card(stage==='not'?'รอนอตตรวจ • ผู้ช่วยบัญชี':'รอเมย์อนุมัติ • ผู้ช่วยบัญชี',elements,stage==='not'?'blue':'purple');
+ const elements=[paragraph('ตรวจเอกสารก่อนกด • ปุ่มใช้ได้เฉพาะ'+(stage==='accounting'?'ฝ่ายบัญชี':stage==='not'?'นอต':'เมย์')+'\n'+rows.length+' ใบสรุป แยกบริษัท • ไม่ใช่การยืนยันโอนเงิน')];
+ for(const x of rows){elements.push(paragraph(rowText(x)),{tag:'action',actions:[button(stage==='accounting'?'บัญชีตรวจผ่าน → ส่งให้นอต':stage==='not'?'ตรวจผ่าน → ส่งให้เมย์':'Approve',{finance:true,nonce,action:'accept',id:x.r.record_id}),button('ส่งกลับแก้ไข',{finance:true,nonce,action:'return',id:x.r.record_id})]});}
+ elements.push({tag:'action',actions:[{...button(stage==='accounting'?'บัญชีตรวจผ่านทั้งหมด → ส่งให้นอต':stage==='not'?'ตรวจผ่านทั้งหมดในชุดนี้':'Approve ทั้งหมดในชุดนี้',{finance:true,nonce,action:'accept-all'}),type:'primary',confirm:{title:plain('ยืนยัน '+rows.length+' ใบสรุป'),text:plain('ตรวจเอกสารและยอดครบทุกบริษัทแล้วใช่ไหม')}}]});
+ return card(stage==='accounting'?'รอบัญชีตรวจเอกสาร • ผู้ช่วยบัญชี':stage==='not'?'รอนอตตรวจ • ผู้ช่วยบัญชี':'รอเมย์อนุมัติ • ผู้ช่วยบัญชี',elements,stage==='not'?'blue':'purple');
 }
 function transferCard(rows,test,portal){
  const elements=[paragraph(test?'**ทดสอบกระบวนการ • ห้ามโอนเงินจริง • ไม่ลง PEAK**':'**นอตตรวจและเมย์อนุมัติ พร้อม PDF แล้ว → รอนอตโอน**')];
@@ -85,18 +99,19 @@ async function patch(env,id,c){return api(env,'im/v1/messages/'+encodeURICompone
 export async function financeTick(owner){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true')return {disabled:true};
  if(!env.LARK_VERIFICATION_TOKEN)throw Error('Missing callback verification setting');
- const [all,recipients]=await Promise.all([snapshot(env),people(env)]);const groups={not:[],may:[],transfer:[],test:[]};
- for(const x of all){const stage=financeStage(x.r,x.j);if(groups[stage])groups[stage].push(x);}
- if(env.FINANCE_TEST_ONLY==='true'){groups.not=[];groups.may=[];groups.transfer=[];}
+ const [all,recipients]=await Promise.all([snapshot(env),people(env)]);const groups={accounting:[],not:[],may:[],transfer:[],test:[]};
+ for(const x of all){const stage=await checkedStage(x.r,x.j);if(groups[stage])groups[stage].push(x);}
+ if(env.FINANCE_TEST_ONLY==='true'){groups.accounting=[];groups.not=[];groups.may=[];groups.transfer=[];}
  let sends=0;
  for(const stage of Object.keys(groups)){
-  const rows=groups[stage].sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));const size=stage==='not'||stage==='may'?5:15;
+  const rows=groups[stage].sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));const size=['accounting','not','may'].includes(stage)?5:15;
   const active=[];
-  for(let i=0;i<rows.length;i+=size){const chunk=rows.slice(i,i+size);const signatures=await Promise.all(chunk.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),linkOf(x.r.fields['PDF อนุมัติแล้ว']),x.r.fields['หลักฐานการโอน']||[]]));
-   const key='card:v2:'+stage+':'+await digest(signatures);active.push(key);let saved=await ctx.storage.get(key);
+  for(let i=0;i<rows.length;i+=size){const chunk=rows.slice(i,i+size);const signatures=await Promise.all(chunk.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),linkOf(x.r.fields['PDF อนุมัติแล้ว']),x.r.fields['หลักฐานการโอน']||[],...(['accounting','not','may'].includes(stage)?[x.r.fields['เวลาบัญชีตรวจผ่าน']||0,x.r.fields['เวลานอตตรวจผ่าน']||0]:[])]));
+   const key='card:v2:'+stage+':'+await digest(['accounting','not','may'].includes(stage)?[signatures,recipients[stage]]:signatures);active.push(key);let saved=await ctx.storage.get(key);
    if(saved?.sent)continue;if(sends>=4)continue;
-   if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:stage==='may'?recipients.may:recipients.not};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
-   const c=stage==='not'||stage==='may'?reviewCard(stage,chunk,saved.nonce):transferCard(chunk,stage==='test',(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=transfers&k='+encodeURIComponent(saved.nonce));
+   if(stage==='accounting'&&!recipients.accounting){console.log('FINANCE_ACCOUNTANT_MISSING',chunk.length);continue;}
+   if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:recipients[stage]||recipients.not};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
+   const c=['accounting','not','may'].includes(stage)?reviewCard(stage,chunk,saved.nonce):transferCard(chunk,stage==='test',(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=transfers&k='+encodeURIComponent(saved.nonce));
    saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;await ctx.storage.put(key,saved);console.log('FINANCE_CARD_SENT',stage,chunk.length,saved.message);sends++;
   }
   const old=await ctx.storage.get('active:'+stage)||[];
@@ -114,7 +129,7 @@ export async function financeCallback(owner,b){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true'||!verifiedCallback(env,b))throw Error('Unauthorized callback');
  const v=b.event?.action?.value||{},actor=b.event?.operator?.open_id;
  const key=await ctx.storage.get('nonce:'+v.nonce),saved=key&&await ctx.storage.get(key);
- if(!saved||saved.retired||saved.recipient!==actor||!['not','may'].includes(saved.stage)||Date.now()-saved.created>7*86400000)return {ignored:true};
+ if(!saved||saved.retired||saved.recipient!==actor||!['accounting','not','may'].includes(saved.stage)||Date.now()-saved.created>7*86400000)return {ignored:true};
  if(!['accept','accept-all','return'].includes(v.action))return {ignored:true};
  const targets=saved.signatures.filter(x=>v.action==='accept-all'||x[0]===v.id);if(!targets.length)return {ignored:true};
  const recipients=await people(env);if(actor!==recipients[saved.stage])return {ignored:true};
@@ -122,16 +137,17 @@ export async function financeCallback(owner,b){
  for(const [id,expected] of targets){
   const doneKey='decision:'+saved.nonce+':'+id;if(await ctx.storage.get(doneKey)){results.push(id+' ทำรายการแล้ว');continue;}
   try{
-   const x=all.find(x=>x.r.record_id===id);if(!x||financeStage(x.r,x.j)!==saved.stage||await fingerprint(x.r,x.j)!==expected)throw Error('ข้อมูลหรือสถานะเปลี่ยน กรุณาใช้การ์ดล่าสุด');
+   const x=all.find(x=>x.r.record_id===id);if(!x||await checkedStage(x.r,x.j)!==saved.stage||await fingerprint(x.r,x.j)!==expected)throw Error('ข้อมูลหรือสถานะเปลี่ยน กรุณาใช้การ์ดล่าสุด');
    // Read record immediately before mutation, and compare with issued card again.
    x.r=(await api(env,recordsPath(SUMMARY)+'/'+id)).record;
-   if(financeStage(x.r,x.j)!==saved.stage||await fingerprint(x.r,x.j)!==expected)throw Error('ข้อมูลเปลี่ยนระหว่างตรวจ');
+   if(await checkedStage(x.r,x.j)!==saved.stage||await fingerprint(x.r,x.j)!==expected)throw Error('ข้อมูลเปลี่ยนระหว่างตรวจ');
    const f=x.r.fields;const checked=textOf(f['ข้อมูลที่นอตตรวจผ่าน']);
    if(saved.stage==='may'&&checked&&checked!==expected)throw Error('ข้อมูลต่างจากที่นอตตรวจ ต้องตรวจใหม่');
-   const fields=v.action==='return'?{'ส่งกลับแก้ไขก่อนอนุมัติ':true,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':''}:
+   const fields=v.action==='return'?{'ส่งกลับแก้ไขก่อนอนุมัติ':true,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','บัญชีตรวจผ่าน':false,'ข้อมูลที่บัญชีตรวจผ่าน':''}:
+    saved.stage==='accounting'?{'บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':actor,'เวลาบัญชีตรวจผ่าน':Date.now(),'ข้อมูลที่บัญชีตรวจผ่าน':expected,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','ผู้ตรวจสอบก่อนอนุมัติ':'','เวลานอตตรวจผ่าน':null}:
     saved.stage==='not'?{'นอตตรวจผ่าน':true,'ผู้ตรวจสอบก่อนอนุมัติ':'นอต (NOT)','เวลานอตตรวจผ่าน':Date.now(),'ข้อมูลที่นอตตรวจผ่าน':expected}:{Approve:true};
    await api(env,recordsPath(SUMMARY)+'/'+id,'PUT',{fields});
-   await ctx.storage.put(doneKey,{at:Date.now(),actor,action:v.action,fingerprint:expected});results.push(textOf(f['เลขใบขอเบิก'])+' '+(v.action==='return'?'ส่งกลับแล้ว':saved.stage==='not'?'ตรวจผ่านแล้ว':'อนุมัติแล้ว รอสร้าง PDF'));
+   await ctx.storage.put(doneKey,{at:Date.now(),actor,action:v.action,fingerprint:expected});results.push(textOf(f['เลขใบขอเบิก'])+' '+(v.action==='return'?'ส่งกลับแล้ว':saved.stage==='accounting'?'บัญชีตรวจผ่านแล้ว รอส่งให้นอต':saved.stage==='not'?'ตรวจผ่านแล้ว':'อนุมัติแล้ว รอสร้าง PDF'));
   }catch(e){results.push(id+' — '+e.message);}
  }
  // Preserve buttons for unselected documents; poll replaces cards after state changes.

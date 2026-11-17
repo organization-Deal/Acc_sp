@@ -1,3 +1,4 @@
+import {validateBills} from './validation.js';
 import { companyOf, companyError } from './companies.js';
 // ════════════════════════════════════════════════════════════════
 // index.js — Worker entry + SessionDO
@@ -407,10 +408,12 @@ export class SessionDO extends DurableObject {
   async #prepareConfirm(s) {
     const bills = s.state.bills;
     if (!bills.length) return { ok: false, error: 'ยังไม่มีรายการให้บันทึก' };
-    const error=companyError(bills);
+    if(s.saving||s.tosave)return {ok:false,error:"รายการนี้กำลังบันทึกหรือรอตรวจผล กรุณาอย่ากดย้ำ"};
+    const error=validateBills(materializeBills(s.state));
     if(error)return {ok:false,error};
     const materialized = materializeBills(s.state);
     s.tosave = materialized;
+    s.saving=true;
     await this.#save(s);
     if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildResultCard('saving', materialized));
     return { ok: true, count: materialized.length };
@@ -426,10 +429,13 @@ export class SessionDO extends DurableObject {
 
     const emp = await findEmployee(this.env, openId);
     if (!emp) {
+      s.saving=false;await this.#save(s);
       await reply(this.env, openId, '⚠️ ยังไม่ได้ลงทะเบียนพนักงาน\nพิมพ์ "id" เอา open_id ไปใส่คอลัมน์ "Lark open_id" ในตารางพนักงานก่อน แล้วส่งบิลใหม่');
       return;
     }
-    const refs = await saveBills(this.env, emp, materialized);
+    let refs;
+    try {refs = await saveBills(this.env, emp, materialized);}
+    catch(err){s.saveError=String(err.message||err);await this.#save(s);await reply(this.env,openId,'⚠️ บันทึกไม่ครบหรือยังยืนยันผลไม่ได้ กรุณาให้บัญชีตรวจรายการใน Lark ก่อนส่งใหม่ เพื่อไม่ให้ซ้ำ: '+s.saveError);return;}
     if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildResultCard('done', materialized, refs));
     await this.ctx.storage.delete('session');
     await reply(this.env, openId, `✅ บันทึกแล้ว ${materialized.length} รายการ:\n` +
@@ -515,9 +521,10 @@ export class SessionDO extends DurableObject {
         itemsMeta[id] = { role: it.role, amount: it.amount, vendor: it.vendor };
       });
       return { ok: true,
-        bills: s.state.bills.map(b => ({ id: b.id, company_id:b.company_id||null, receipt_requested:b.receipt_requested===true, amount: b.amount, category: b.category, ai_detail: b.ai_detail, warn: b.warn, memberIds: b.memberIds, no_receipt_reason: b.no_receipt_reason || null })),
+        bills: s.state.bills.map(b => ({ id: b.id, expense_date:b.expense_date||'',pay_type:b.pay_type||'',purpose_confirmed:b.purpose_confirmed===true, company_id:b.company_id||null, receipt_requested:b.receipt_requested===true, amount: b.amount, category: b.category, ai_detail: b.ai_detail, warn: b.warn, memberIds: b.memberIds, no_receipt_reason: b.no_receipt_reason || null })),
         pool: s.state.pool, itemsMeta };
     }
+    if(s.saving)return {ok:false,error:'กำลังบันทึกหรือรอตรวจผล ห้ามแก้รายการระหว่างนี้'};
     if (act === 'assign') {
       const r = assignItem(s.state, body.msgId, body.target);
       if (r.ok) await this.#save(s);

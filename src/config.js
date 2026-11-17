@@ -20,7 +20,7 @@ export const CFG = {
 
   F: {
     REQUESTER:   'ผู้เบิก',
-    DATE:        'วันที่ส่งคำขอ',
+    DATE:        'วันที่ใช้จ่าย',
     DETAIL:      'รายละเอียดค่าใช้จ่าย',
     AI_DETAIL:   'AI Gen ค่าใช้จ่าย',
     AMOUNT:      'จำนวนเงิน',

@@ -1,3 +1,4 @@
+import {validDate} from './validation.js';
 import { COMPANIES, companyOf } from './companies.js';
 // ════════════════════════════════════════════════════════════════
 // domain.js — logic ล้วน ไม่มี I/O
@@ -69,6 +70,8 @@ function recomputeBill(state, bill) {
   bill.mismatch = bill.amount != null && bill.pay_amount != null &&
     Math.abs(bill.amount - bill.pay_amount) > CFG.AMOUNT_TOLERANCE;
 
+  if (!bill.expense_date) bill.expense_date = (anchor && anchor.date) || '';
+  if (slip) bill.pay_type = 'เงินโอน';
   if (!bill.ai_detail) bill.ai_detail = (anchor && anchor.ai_detail) || '';
   if (!bill.pay_type) bill.pay_type = (anchor && anchor.pay_type) || '';
 
@@ -150,6 +153,12 @@ export function assignItem(state, msgId, target) {
 export function updateBill(state, billId, patch) {
   const bill = state.bills.find(b => b.id === billId);
   if (!bill) return { ok: false, error: 'ไม่พบบิลนี้' };
+  if (patch.expense_date !== undefined && !validDate(patch.expense_date)) return {ok:false,error:'วันที่ใช้จ่ายไม่ถูกต้อง'};
+  if (patch.pay_type !== undefined && !CFG.PAY_TYPES.includes(patch.pay_type)) return {ok:false,error:'วิธีจ่ายไม่ถูกต้อง'};
+  if (patch.category !== undefined && !codeOf(patch.category)) return {ok:false,error:'กรุณาเลือกหมวดจากรายการ'};
+  if (patch.expense_date !== undefined) bill.expense_date=patch.expense_date;
+  if (patch.pay_type !== undefined) bill.pay_type=patch.pay_type;
+  if (patch.purpose_confirmed !== undefined) bill.purpose_confirmed=patch.purpose_confirmed===true;
   if (patch.company_id !== undefined) {
     if(!companyOf(patch.company_id)) return {ok:false,error:'บริษัทไม่ถูกต้อง'};
     bill.company_id=patch.company_id;
@@ -157,7 +166,7 @@ export function updateBill(state, billId, patch) {
   }
   if (patch.receipt_requested !== undefined) bill.receipt_requested=patch.receipt_requested===true;
   if (patch.amount !== undefined) { bill.amount = num(patch.amount); bill.amountLocked = true; }
-  if (patch.ai_detail !== undefined) bill.ai_detail = String(patch.ai_detail).trim();
+  if (patch.ai_detail !== undefined) {bill.ai_detail = String(patch.ai_detail).trim();bill.purpose_confirmed=false;}
   if (patch.category !== undefined && patch.category) {
     bill.category = patch.category; bill.cat_code = codeOf(patch.category); bill.categoryLocked = true;
   }
@@ -195,7 +204,7 @@ export function attachItemToBill(state, billId, item) {
 // ── แปลงเป็นรูปแบบเดิมที่ saveBills() ใน lark.js ใช้ (มี .anchor / .members เต็ม) ──
 export function materializeBills(state) {
   return state.bills.map(b => ({
-    company_id: b.company_id || null, receipt_requested: b.receipt_requested === true,
+    expense_date:b.expense_date||'',purpose_confirmed:b.purpose_confirmed===true, company_id: b.company_id || null, receipt_requested: b.receipt_requested === true,
     anchor: state.itemsById[b.anchorId] || {},
     members: b.memberIds.map(id => state.itemsById[id]).filter(Boolean),
     amount: b.amount, pay_amount: b.pay_amount, category: b.category, cat_code: b.cat_code,
@@ -299,7 +308,7 @@ export function htmlPage(title, msg) {
 // ════════════════════════════════════════════════════════════════
 export function sortPageHtml(openId, tok, workerUrl, state) {
   const bills = state.bills.map(b => ({
-    id: b.id, company_id:b.company_id||null, receipt_requested:b.receipt_requested===true, amount: b.amount, category: b.category, ai_detail: b.ai_detail,
+    id: b.id, expense_date:b.expense_date||'',pay_type:b.pay_type||'',purpose_confirmed:b.purpose_confirmed===true, company_id:b.company_id||null, receipt_requested:b.receipt_requested===true, amount: b.amount, category: b.category, ai_detail: b.ai_detail,
     warn: b.warn, memberIds: b.memberIds, no_receipt_reason: b.no_receipt_reason || null,
   }));
   const pool = state.pool;
@@ -308,7 +317,7 @@ export function sortPageHtml(openId, tok, workerUrl, state) {
     const it = state.itemsById[id];
     itemsMeta[id] = { role: it.role, amount: it.amount, vendor: it.vendor };
   });
-  const initData = JSON.stringify({ bills, pool, itemsMeta, openId, tok, workerUrl, companies: COMPANIES, cats: COMMON_CATS });
+  const initData = JSON.stringify({ bills, pool, itemsMeta, openId, tok, workerUrl, companies: COMPANIES, cats: CAT_TABLE.map(c=>c.n) });
 
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
@@ -428,11 +437,8 @@ function toast(msg, isError){
   t._timer = setTimeout(()=>t.classList.remove('show'), isError?3500:1600);
 }
 
-async function api(act, body){
-  const res = await fetch(D.workerUrl + '?act=' + act + '&u=' + encodeURIComponent(D.openId) + '&k=' + D.tok,
-    { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body||{}) });
-  return res.json();
-}
+let apiQueue=Promise.resolve();
+function api(act,body){const run=async()=>{const res=await fetch(D.workerUrl+'?act='+act+'&u='+encodeURIComponent(D.openId)+'&k='+D.tok,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});return res.json();};const next=apiQueue.then(run);apiQueue=next.catch(()=>{});return next;}
 async function refresh(){
   const r = await api('state');
   if (!r.ok) { toast(r.error || 'โหลดไม่สำเร็จ', true); return; }
@@ -440,6 +446,8 @@ async function refresh(){
   render();
 }
 
+function reviewFields(b){return '<div class="field"><label>วันที่ใช้จ่ายจริง</label><input type="date" data-review="expense_date" data-bill="'+b.id+'" value="'+(b.expense_date||'')+'"></div><div class="field"><label>วิธีจ่าย</label><select data-review="pay_type" data-bill="'+b.id+'"><option value="">เลือกวิธีจ่าย</option>'+['เงินสด','เงินโอน','บัตรเครดิต'].map(v=>'<option'+(b.pay_type===v?' selected':'')+'>'+v+'</option>').join('')+'</select></div><label><input type="checkbox" data-review="purpose_confirmed" data-bill="'+b.id+'" '+(b.purpose_confirmed?'checked':'')+'> ตรวจชื่อรายการด้านล่างแล้ว ตรงกับวัตถุประสงค์จริง</label>';}
+document.addEventListener('change',e=>{const t=e.target;if(t.dataset.review)updateField(t.dataset.bill,t.dataset.review,t.type==='checkbox'?t.checked:t.value);});
 function billOptionsHtml(excludeId){
   let h = '<option value="pool">-- ไม่ระบุ (พักไว้) --</option><option value="new">➕ สร้างรายการใหม่</option>';
   D.bills.forEach((b,i)=>{ if(b.id===excludeId) return;
@@ -481,7 +489,7 @@ function render(){
           '</div>'+
           '<div class="row-amt num">฿'+fmt(b.amount)+'</div>'+
         '</div>'+
-        '<div class="detail"><div class="detail-inner">'+companySelect(b)+
+        '<div class="detail"><div class="detail-inner">'+companySelect(b)+reviewFields(b)+
           '<div class="field"><label>ชื่อรายการ</label>'+
             '<input type="text" value="'+(b.ai_detail||'').replace(/"/g,'&quot;')+'" placeholder="เช่น ค่ากาแฟรับรองลูกค้า" '+
             'onchange="updateField(\\''+b.id+'\\',\\'ai_detail\\',this.value)"></div>'+
@@ -593,6 +601,7 @@ async function addBlank(){
   await refresh();
 }
 async function doConfirm(){
+  await apiQueue;
   if (D.bills.length===0) { toast('ยังไม่มีรายการให้บันทึก'); return; }
   if (!confirm('ยืนยันบันทึก '+D.bills.length+' รายการเข้าระบบ?')) return;
   const r = await api('confirm-web', {});
@@ -600,7 +609,7 @@ async function doConfirm(){
   document.body.innerHTML = '<div style="padding:70px 24px;text-align:center;font-family:inherit;background:#F5F3EF;min-height:100vh">'+
     '<div style="width:64px;height:64px;border-radius:50%;background:#2F7D4F1a;display:flex;align-items:center;justify-content:center;'+
     'font-size:30px;margin:0 auto 16px">✅</div>'+
-    '<div style="font-size:20px;font-weight:700;color:#2B2B2B;margin-top:8px">บันทึกแล้ว '+r.count+' รายการ</div>'+
+    '<div style="font-size:20px;font-weight:700;color:#2B2B2B;margin-top:8px">กำลังบันทึก '+r.count+' รายการ</div>'+
     '<div style="color:#6F6A63;margin-top:8px;font-size:14px">กลับไปแชทได้เลย</div></div>';
 }
 render();

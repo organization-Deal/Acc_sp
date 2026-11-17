@@ -1,3 +1,5 @@
+import {validateBills,normalizeOCR} from './validation.js';
+import {codeOf} from './domain.js';
 import { companyOf, companyError, needsReceipt } from './companies.js';
 // ════════════════════════════════════════════════════════════════
 // lark.js — I/O ทั้งหมด: Lark API, Claude OCR, Bitable
@@ -120,10 +122,11 @@ export async function claudeOCR(env, arrayBuffer) {
   if (!key) throw new Error('ยังไม่ได้ใส่ CLAUDE_KEY');
   const pays = CFG.PAY_TYPES.join('|');
   const prompt =
-`คุณคือ OCR เอกสารการเงินไทยของบริษัทตู้หยอดเหรียญ ตอบ JSON เท่านั้น ห้ามมีข้อความอื่น:
-{"role":"RECEIPT|PAYSLIP|PROOF|OTHER","vendor":"ชื่อร้าน|null","date":"YYYY-MM-DD (พ.ศ.→ค.ศ.)","amount":เลข|null,"tax_id":"13หลัก|null","invoice_no":"เลข|null","pay_type":"${pays}|null","ai_detail":"ประโยคอธิบายค่าใช้จ่ายเชิงทางการ 1 ประโยค","confidence":0-100}
+`คุณคือ OCR เอกสารการเงินไทย อ่านเฉพาะข้อมูลในภาพ ห้ามเดาวัตถุประสงค์หรือธุรกิจ ตอบ JSON เท่านั้น ห้ามมีข้อความอื่น:
+{"role":"RECEIPT|PAYSLIP|PROOF|OTHER","vendor":"ชื่อร้าน|null","date":"YYYY-MM-DD (พ.ศ.→ค.ศ.)","amount":เลข|null,"tax_id":"13หลัก|null","invoice_no":"เลข|null","pay_type":"${pays}|null","ai_detail":"ประโยคอธิบายค่าใช้จ่ายเชิงทางการ 1 ประโยค","confidence":0-100,"is_bank_slip":true|false,"document_text":"ข้อความหัวเอกสารและข้อความรหัสอ้างอิงที่เห็น"}
 role: RECEIPT=ใบเสร็จ/ใบกำกับ, PAYSLIP=สลิปจ่าย, PROOF=หลักฐานโอน, OTHER=อื่นๆ(รูปอาหาร/สถานที่)
-ai_detail: เขียนวัตถุประสงค์ค่าใช้จ่ายให้ดูเป็นทางการ เช่น "ค่าน้ำมันเชื้อเพลิงสำหรับเดินทางบำรุงรักษาตู้"
+สลิปธนาคารที่มีคำว่าโอนเงินสำเร็จ/จ่ายเงินสำเร็จและรหัสอ้างอิง ให้ is_bank_slip=true, role=PAYSLIP, pay_type=เงินโอน เสมอ ไม่ใช่ RECEIPT แม้มี Biller ID หรือเลขผู้เสียภาษี
+ai_detail: ถ้าเป็นสลิปให้ว่าง ถ้าเป็นใบเสร็จใช้เฉพาะชื่อสินค้าหรือบริการที่อ่านได้ ห้ามเติมเพื่อซ่อมตู้/บำรุงรักษา/รับเงินลูกค้า/ค่าธรรมเนียม ถ้าไม่มีระบุ
 อ่านไม่ออก=null แต่ confidence ต้องมี`;
 
   const res = await fetch('https://api.anthropic.com/v1/messages', {
@@ -152,22 +155,23 @@ ai_detail: เขียนวัตถุประสงค์ค่าใช้
   if (!m) throw new Error('Claude ไม่ตอบ JSON: ' + text.substring(0, 120));
   const o = JSON.parse(m[0]);
   o.amount = num(o.amount); o.confidence = num(o.confidence);
-  return o;
+  return normalizeOCR(o);
 }
 
 // ════════════════════════════════════════════════════════════════
 // บันทึกเข้า "คำขอเบิกเงิน"
 // ════════════════════════════════════════════════════════════════
 export async function saveBills(env, emp, bills) {
-  const error=companyError(bills);if(error)throw new Error(error);
+  const error=validateBills(bills);if(error)throw new Error(error);
   const refs = [];
   for (const b of bills) {
     const att = { payslip: [], receipt: [], tax: [], evidence: [] };
     for (const m of b.members) {
       let tok;
-      try { tok = m.file_token ? m.file_token : await uploadToBitable(env, m.message_id, m.image_key); } catch (e) { continue; }
+      if(!m.file_token && !m.image_key)continue;
+      try { tok = m.file_token ? m.file_token : await uploadToBitable(env, m.message_id, m.image_key); } catch (e) { throw new Error('แนบรูปไม่สำเร็จ: '+(e.message||e)); }
       const cell = { file_token: tok };
-      if (m.role === 'PAYSLIP') att.payslip.push(cell);
+      if (m.role === 'PAYSLIP' || m.role === 'PROOF') att.payslip.push(cell);
       else if (m.role === 'RECEIPT') (m.tax_id ? att.tax : att.receipt).push(cell);
       else att.evidence.push(cell);
     }
@@ -180,8 +184,8 @@ export async function saveBills(env, emp, bills) {
     if (b.ai_detail) f[CFG.F.AI_DETAIL] = b.ai_detail;
     f[CFG.F.AMOUNT]    = b.amount || 0;
     f[CFG.F.STATUS]    = CFG.STATUS_PENDING;
-    if (b.anchor.date) f[CFG.F.DATE] = new Date(b.anchor.date).getTime();
-    const code = b.cat_code;
+    f[CFG.F.DATE] = new Date(b.expense_date+'T00:00:00+07:00').getTime();
+    const code = codeOf(b.category);
     if (b.category && code) {
       f[CFG.F.CATEGORY]   = b.category;
       f[CFG.F.CAT_CODE_F] = code;

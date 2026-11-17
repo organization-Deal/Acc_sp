@@ -27,3 +27,23 @@ test('changed reviewed data must go back to accounting, even when Not checkbox r
  r.fields['ข้อมูลที่บัญชีตรวจผ่าน']=await fingerprint(r,j);assert.equal(await checkedStage(r,j),'not');
 });
 test('a checkbox alone cannot bypass accounting review',async()=>{const {r,j}=fixture();r.fields['บัญชีตรวจผ่าน']=true;r.fields['นอตตรวจผ่าน']=true;assert.equal(await checkedStage(r,j),'accounting');});
+
+test('table button rejects incomplete, altered, already approved and paid summaries',async()=>{
+ const {tableReviewProblem}=await import('../src/finance.js');
+ const {r,j}=fixture();assert.equal(tableReviewProblem(r,j),'');
+ r.fields['ยอดรวม']=99;assert.ok(tableReviewProblem(r,j));r.fields['ยอดรวม']=10;
+ r.fields.Approve=true;assert.ok(tableReviewProblem(r,j));r.fields.Approve=false;
+ r.fields['รายการสำเร็จ']=true;assert.ok(tableReviewProblem(r,j));
+});
+test('table review consumes one request, routes to Not and preserves review on repeat click',async()=>{
+ const {tableReview,TABLE_REQUEST}=await import('../src/finance.js');
+ const {r,j}=fixture();const env={KV:{get:async()=> 'test-token'}},writes=[],realFetch=globalThis.fetch;
+ r.fields[TABLE_REQUEST]=true;
+ globalThis.fetch=async(url,opt={})=>{if(opt.method==='PUT'){const fields=JSON.parse(opt.body).fields;writes.push(fields);Object.assign(r.fields,fields);}return new Response(JSON.stringify({code:0,data:{record:structuredClone(r)}}));};
+ try {
+  await tableReview(env,{r,j});assert.equal(r.fields[TABLE_REQUEST],false);assert.equal(await checkedStage(r,j),'not');assert.equal(r.fields.Approve,undefined);
+  const at=r.fields['เวลาบัญชีตรวจผ่าน'];r.fields['นอตตรวจผ่าน']=true;r.fields['ผู้ตรวจสอบก่อนอนุมัติ']='N';r.fields['เวลานอตตรวจผ่าน']=123;r.fields['ข้อมูลที่นอตตรวจผ่าน']=await fingerprint(r,j);
+  r.fields[TABLE_REQUEST]=true;await tableReview(env,{r,j});assert.equal(r.fields['เวลาบัญชีตรวจผ่าน'],at);assert.equal(await checkedStage(r,j),'may');
+  r.fields[TABLE_REQUEST]=true;r.fields.Approve=true;await tableReview(env,{r,j});assert.equal(r.fields.Approve,true);assert.match(r.fields['ผลตรวจบัญชี (ระบบ)'],/ไม่ส่งซ้ำ/);
+ }finally{globalThis.fetch=realFetch;}
+});

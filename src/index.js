@@ -1,3 +1,4 @@
+import {portalAction,portalAuth,transferPage} from './transfer.js';
 import {financeTick,financeCallback,verifiedCallback} from './finance.js';
 import {validateBills} from './validation.js';
 import { companyOf, companyError } from './companies.js';
@@ -60,6 +61,7 @@ async function handleGet(request, env, ctx) {
   const url = new URL(request.url);
   const p = Object.fromEntries(url.searchParams);
   const act = p.act || '';
+  if(act==='transfers'){try{await doStub(env,'finance-coordinator-v1').transferAccess(p.k);return new Response(transferPage(p.k),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}catch{return new Response('ลิงก์หมดอายุ เปิดการ์ดล่าสุดในผู้ช่วยบัญชี',{status:403});}}
   if (!act) return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v2', note: 'ส่งบิลในแชท Lark' });
 
   // ── หน้าเว็บ "แมตยอด" (gate ด้วย token, ไม่ผูกกับ session บิล) ──
@@ -97,6 +99,7 @@ async function handleGet(request, env, ctx) {
 async function handlePost(request, env, ctx) {
   const url = new URL(request.url);
   const act = url.searchParams.get('act');
+  if(act==='transfer-api'){try{return json(await doStub(env,'finance-coordinator-v1').transferAction(await request.json()));}catch(e){return json({ok:false,error:e.message});}}
 
   // อัปโหลดรูปหลักฐานจากหน้าเว็บ (body = raw bytes ของรูป ไม่ใช่ JSON)
   if (act === 'upload') {
@@ -213,6 +216,9 @@ async function handleMessage(event, env) {
 // storage 'session' = { openId, state:{itemsById,bills,pool}, cardmsg, tok, tosave }
 // ════════════════════════════════════════════════════════════════
 export class SessionDO extends DurableObject {
+  async transferAccess(k){await portalAuth(this,k);return true;}
+  async transferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>portalAction(this,b));this.financeSerial=run.catch(()=>{});return run;}
+
   async financePoll() {
     const run=(this.financeSerial||Promise.resolve()).then(()=>financeTick(this));
     this.financeSerial=run.catch(()=>{});return run;

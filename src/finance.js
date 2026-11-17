@@ -1,7 +1,7 @@
 // Unified accounting cards. No bank transfer or PEAK payment is performed here.
 import {CFG} from './config.js';
 import {larkToken} from './lark.js';
-const SUMMARY='tblgakFKBOvz9aCW', LEDGER='tbljMfJTB5VIis8Y';
+export const SUMMARY='tblgakFKBOvz9aCW', LEDGER='tbljMfJTB5VIis8Y';
 const BASE='https://ljpth1hipfdu.jp.larksuite.com/base/'+CFG.BASE_TOKEN;
 const SUMMARY_URL=BASE+'?table='+SUMMARY+'&view=vewzhj4jy0';
 const NAMES={not:'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา',may:'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ'};
@@ -10,7 +10,7 @@ const linkOf=v=>v&&typeof v==='object'?v.link||'':String(v||'');
 const md=v=>textOf(v).replace(/[\\*_\[\]<>]/g,' ').replace(/\r?\n/g,' ');
 const money=v=>Number(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
 const testOf=(f,j)=>/\bTEST\b|ทดสอบ|ไม่โอนเงินจริง/i.test([f['เลขใบขอเบิก'],f['สรุปค่าใช้จ่าย'],f['หมายเหตุ'],JSON.stringify(j.items||[])].join(' '));
-const digest=async v=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(v)))),n=>n.toString(16).padStart(2,'0')).join('');
+export const digest=async v=>Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256',new TextEncoder().encode(JSON.stringify(v)))),n=>n.toString(16).padStart(2,'0')).join('');
 export function financeProblem(f,j,id){
  if(!j||j.summaryId!==id||j.key!==textOf(f['รหัสงานระบบ']))return 'ไม่พบงานต้นทางที่ตรงกัน';
  if(!['PSH','PWA','ODP'].includes(j.company?.id))return 'บริษัทไม่รองรับ';
@@ -42,18 +42,18 @@ export async function fingerprint(r,j){
  const f=r.fields;return digest([r.record_id,j.key,j.docId,j.pdfUrl,j.company,j.employee,j.currency,j.items,j.refs,
  ...['ยอดรวม','จำนวนรายการ','บริษัท','รหัสบริษัท','ชื่อพนักงาน','ชื่อบัญชี','เลขบัญชี','ธนาคาร','Doc ID','เลขใบขอเบิก','รายการต้นทาง JSON','สรุปค่าใช้จ่าย','ข้อมูลบริษัท ณ วันออกเอกสาร'].map(k=>f[k]??null)]);
 }
-async function api(env,path,method='GET',body){
+export async function api(env,path,method='GET',body){
  const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
  const result=await response.json();if(!response.ok||result.code!==0)throw Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));return result.data;
 }
-const recordsPath=table=>'bitable/v1/apps/'+CFG.BASE_TOKEN+'/tables/'+table+'/records';
+export const recordsPath=table=>'bitable/v1/apps/'+CFG.BASE_TOKEN+'/tables/'+table+'/records';
 async function list(env,table){let rows=[],page='';do{const d=await api(env,recordsPath(table)+'?page_size=500'+(page?'&page_token='+encodeURIComponent(page):''));rows.push(...(d.items||[]));page=d.has_more?d.page_token:'';}while(page);return rows;}
-async function snapshot(env){
+export async function snapshot(env){
  const [rows,ledgers]=await Promise.all([list(env,SUMMARY),list(env,LEDGER)]);const jobs={};
  for(const r of ledgers){try{const j=JSON.parse(textOf(r.fields['ข้อมูลงาน JSON']));if(j.key)jobs[j.key]=j;}catch{}}
  return rows.map(r=>({r,j:jobs[textOf(r.fields['รหัสงานระบบ'])]}));
 }
-async function people(env){
+export async function people(env){
  const rows=await list(env,CFG.T_EMPLOYEE),out={};
  for(const role of ['not','may']){const matches=rows.filter(r=>textOf(r.fields['Name (TH)'])===NAMES[role]);if(matches.length!==1)throw Error('ทะเบียน '+role+' ไม่ตรงหนึ่งคน');out[role]=textOf(matches[0].fields['Lark open_id']);if(!/^ou_[a-z0-9]+$/.test(out[role]))throw Error('ไม่พบ Lark open_id ของ '+role);}
  if(out.not===out.may)throw Error('ผู้ตรวจและผู้อนุมัติต้องเป็นคนละคน');return out;
@@ -69,14 +69,14 @@ function reviewCard(stage,rows,nonce){
  elements.push({tag:'action',actions:[{...button(stage==='not'?'ตรวจผ่านทั้งหมดในชุดนี้':'Approve ทั้งหมดในชุดนี้',{finance:true,nonce,action:'accept-all'}),type:'primary',confirm:{title:plain('ยืนยัน '+rows.length+' ใบสรุป'),text:plain('ตรวจเอกสารและยอดครบทุกบริษัทแล้วใช่ไหม')}}]});
  return card(stage==='not'?'รอนอตตรวจ • ผู้ช่วยบัญชี':'รอเมย์อนุมัติ • ผู้ช่วยบัญชี',elements,stage==='not'?'blue':'purple');
 }
-function transferCard(rows,test){
+function transferCard(rows,test,portal){
  const elements=[paragraph(test?'**ทดสอบกระบวนการ • ห้ามโอนเงินจริง • ไม่ลง PEAK**':'**นอตตรวจและเมย์อนุมัติ พร้อม PDF แล้ว → รอนอตโอน**')];
  for(const company of ['PSH','PWA','ODP'])for(const currency of [...new Set(rows.filter(x=>x.j.company.id===company).map(x=>x.j.currency))]){
   const group=rows.filter(x=>x.j.company.id===company&&x.j.currency===currency);elements.push({tag:'hr'},paragraph('**'+md(group[0].j.company.name)+'**\n'+group.length+' รายการโอน ('+group.reduce((s,x)=>s+x.j.items.length,0)+' บิล) • รวม **'+money(group.reduce((s,x)=>s+Number(x.r.fields['ยอดรวม']),0))+' '+md(currency)+'**'));
   for(const x of group){const f=x.r.fields;elements.push(paragraph('**'+md(f['ชื่อบัญชี'])+'**\n'+md(f['ธนาคาร'])+' • '+md(f['เลขบัญชี'])+'\nยอด **'+money(f['ยอดรวม'])+' '+md(currency)+'**\n'+md(f['เลขใบขอเบิก'])+(f['หลักฐานการโอน']?.length?'\n⚠️ มีสลิปแล้ว ตรวจหลักฐานก่อน ห้ามโอนซ้ำ':'')+'\n[PDF อนุมัติแล้ว]('+x.j.approvedPdf+') | [เปิดรายการ]('+SUMMARY_URL+'&record='+x.r.record_id+')'));}
  }
  elements.push(paragraph(test?'เมย์อนุมัติแล้ว ระบบส่งกลับมาหานอตสำเร็จ — รายการนี้ไม่นับในยอดรอโอนจริง':'หลังโอน ส่งสลิปหลายใบผ่านคำสั่ง “แมตยอด” ในแชทผู้ช่วยบัญชี เลือกบริษัทและตรวจคู่รายการก่อนยืนยัน'));
- if(!test)elements.push({tag:'action',actions:[button('เปิดรายการรอโอน',null,BASE+'?table='+SUMMARY+'&view=vewmaVZMKW')]});
+ elements.push({tag:'action',actions:[{...button(test?'เปิดหน้าโอนตัวอย่าง':'เปิดรายการโอน / แนบสลิปหลายใบ',null,portal),type:'primary'}]});
  return card(test?'TEST • เมย์อนุมัติแล้ว → นอต':'รายการรอโอน • NOT',elements,test?'orange':'green');
 }
 async function send(env,to,c,uuid){const d=await api(env,'im/v1/messages?receive_id_type=open_id','POST',{receive_id:to,msg_type:'interactive',content:JSON.stringify(c),uuid:uuid.slice(0,50)});if(!d.message_id)throw Error('No message_id');return d.message_id;}
@@ -93,10 +93,10 @@ export async function financeTick(owner){
   const rows=groups[stage].sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));const size=stage==='not'||stage==='may'?5:15;
   const active=[];
   for(let i=0;i<rows.length;i+=size){const chunk=rows.slice(i,i+size);const signatures=await Promise.all(chunk.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),linkOf(x.r.fields['PDF อนุมัติแล้ว']),x.r.fields['หลักฐานการโอน']||[]]));
-   const key='card:'+stage+':'+await digest(signatures);active.push(key);let saved=await ctx.storage.get(key);
+   const key='card:v2:'+stage+':'+await digest(signatures);active.push(key);let saved=await ctx.storage.get(key);
    if(saved?.sent)continue;if(sends>=4)continue;
    if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:stage==='may'?recipients.may:recipients.not};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
-   const c=stage==='not'||stage==='may'?reviewCard(stage,chunk,saved.nonce):transferCard(chunk,stage==='test');
+   const c=stage==='not'||stage==='may'?reviewCard(stage,chunk,saved.nonce):transferCard(chunk,stage==='test',(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=transfers&k='+encodeURIComponent(saved.nonce));
    saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;await ctx.storage.put(key,saved);console.log('FINANCE_CARD_SENT',stage,chunk.length,saved.message);sends++;
   }
   const old=await ctx.storage.get('active:'+stage)||[];

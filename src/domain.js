@@ -333,7 +333,7 @@ export function sortPageHtml(openId, tok, workerUrl, state) {
     --red:#8B1E1E; --green:#2F7D4F; --amber:#B7791F;
     --num:'Plus Jakarta Sans'; }
   body { margin:0; font-family:'Plus Jakarta Sans','Anuphan',-apple-system,BlinkMacSystemFont,sans-serif;
-    background:var(--bg); color:var(--ink); padding-bottom:120px; -webkit-font-smoothing:antialiased;
+    background:var(--bg); color:var(--ink); padding-bottom:calc(220px + env(safe-area-inset-bottom)); -webkit-font-smoothing:antialiased;
     letter-spacing:-0.011em; font-feature-settings:'tnum' 1, 'cv01' 1; }
   .num { font-variant-numeric:tabular-nums; font-feature-settings:'tnum' 1; }
 
@@ -367,11 +367,16 @@ export function sortPageHtml(openId, tok, workerUrl, state) {
   .detail-inner { padding:14px 2px 2px; }
   .field { margin-bottom:12px; }
   .field label { display:block; font-size:12px; font-weight:600; color:var(--sub); margin:0 0 6px 2px; }
-  .detail input, .detail select { border:none; background:var(--fill); border-radius:12px; padding:13px 14px; font-size:16px;
+  .detail input:not([type="checkbox"]):not([type="file"]), .detail select { border:none; background:var(--fill); border-radius:12px; padding:13px 14px; font-size:16px;
     width:100%; font-family:inherit; color:var(--ink); -webkit-appearance:none; appearance:none; }
   .detail select { background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='8'%3E%3Cpath d='M1 1l5 5 5-5' stroke='%238A857D' stroke-width='1.6' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
     background-repeat:no-repeat; background-position:right 14px center; padding-right:36px; }
   .detail input:focus, .detail select:focus { outline:none; box-shadow:0 0 0 2px rgba(139,30,30,.22); }
+  .check-row { display:flex; align-items:flex-start; gap:10px; margin:12px 0 18px; font-size:14px; line-height:1.5; cursor:pointer; }
+  .detail .check-row input[type="checkbox"] { appearance:auto; -webkit-appearance:checkbox; width:22px; height:22px; flex:0 0 22px; margin:0; padding:0; accent-color:var(--red); }
+  .two .field { min-width:0; }
+  .confirm-hint { width:100%; font-size:12px; line-height:1.5; color:var(--sub); margin:0; }
+  .btn-confirm:disabled { background:#D5D1CC; color:#625D57; box-shadow:none; cursor:not-allowed; }
   .two { display:flex; gap:10px; }
   .two .field:first-child { flex:0 0 42%; }
   .two .field:last-child { flex:1; }
@@ -395,7 +400,7 @@ export function sortPageHtml(openId, tok, workerUrl, state) {
     -webkit-appearance:none; appearance:none; color:var(--ink); font-family:inherit; }
 
   footer { position:fixed; bottom:0; left:0; right:0; padding:14px 16px calc(14px + env(safe-area-inset-bottom));
-    background:linear-gradient(to top, #FFFFFF 62%, rgba(255,255,255,0)); display:flex; gap:10px; }
+    background:linear-gradient(to top, #FFFFFF 62%, rgba(255,255,255,0)); display:flex; flex-wrap:wrap; gap:10px; z-index:10; }
   footer button { flex:1; padding:16px; font-size:16px; font-weight:700; border:none; border-radius:16px; font-family:inherit; cursor:pointer; letter-spacing:-0.01em; }
   footer button:active { transform:scale(.985); }
   .btn-confirm { flex:1.6; background:var(--red); color:#fff; box-shadow:0 6px 18px rgba(139,30,30,.24); }
@@ -420,8 +425,9 @@ export function sortPageHtml(openId, tok, workerUrl, state) {
 <div class="group-label"><span id="poolLabel">รูปที่ยังไม่ได้จัด</span> <label class="act">＋ อัปโหลดรูป<input type="file" accept="image/*" style="display:none" onchange="uploadEvidence(this.files[0],'pool')"></label></div>
 <div id="pool" class="pool-grid"></div>
 <footer>
+  <p id="confirmHint" class="confirm-hint" role="status" aria-live="polite"></p>
   <button class="btn-add" onclick="addBlank()">＋ เปล่า</button>
-  <button class="btn-confirm" onclick="doConfirm()">ยืนยันบันทึก</button>
+  <button id="confirmButton" class="btn-confirm" disabled aria-describedby="confirmHint" onclick="doConfirm()">ยืนยันบันทึก</button>
 </footer>
 <div class="toast" id="toast"></div>
 <script>
@@ -437,8 +443,8 @@ function toast(msg, isError){
   t._timer = setTimeout(()=>t.classList.remove('show'), isError?3500:1600);
 }
 
-let apiQueue=Promise.resolve();
-function api(act,body){const run=async()=>{const res=await fetch(D.workerUrl+'?act='+act+'&u='+encodeURIComponent(D.openId)+'&k='+D.tok,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});return res.json();};const next=apiQueue.then(run);apiQueue=next.catch(()=>{});return next;}
+let apiQueue=Promise.resolve(), pendingRequests=0, submitting=false;
+function api(act,body){pendingRequests++;updateConfirmState();const run=async()=>{const res=await fetch(D.workerUrl+'?act='+act+'&u='+encodeURIComponent(D.openId)+'&k='+D.tok,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});return res.json();};const next=apiQueue.then(run).finally(()=>{pendingRequests--;updateConfirmState();});apiQueue=next.catch(()=>{});return next;}
 async function refresh(){
   const r = await api('state');
   if (!r.ok) { toast(r.error || 'โหลดไม่สำเร็จ', true); return; }
@@ -446,7 +452,8 @@ async function refresh(){
   render();
 }
 
-function reviewFields(b){return '<div class="field"><label>วันที่ใช้จ่ายจริง</label><input type="date" data-review="expense_date" data-bill="'+b.id+'" value="'+(b.expense_date||'')+'"></div><div class="field"><label>วิธีจ่าย</label><select data-review="pay_type" data-bill="'+b.id+'"><option value="">เลือกวิธีจ่าย</option>'+['เงินสด','เงินโอน','บัตรเครดิต'].map(v=>'<option'+(b.pay_type===v?' selected':'')+'>'+v+'</option>').join('')+'</select></div><label><input type="checkbox" data-review="purpose_confirmed" data-bill="'+b.id+'" '+(b.purpose_confirmed?'checked':'')+'> ตรวจชื่อรายการด้านล่างแล้ว ตรงกับวัตถุประสงค์จริง</label>';}
+function reviewFields(b){return '<div class="field"><label>วันที่ใช้จ่ายจริง</label><input type="date" data-review="expense_date" data-bill="'+b.id+'" value="'+(b.expense_date||'')+'"></div><div class="field"><label>วิธีจ่าย</label><select data-review="pay_type" data-bill="'+b.id+'"><option value="">เลือกวิธีจ่าย</option>'+['เงินสด','เงินโอน','บัตรเครดิต'].map(v=>'<option'+(b.pay_type===v?' selected':'')+'>'+v+'</option>').join('')+'</select></div>';}
+function purposeCheck(b){return '<label class="check-row"><input type="checkbox" data-review="purpose_confirmed" data-bill="'+b.id+'" '+(b.purpose_confirmed?'checked':'')+'><span>ตรวจรายละเอียดแล้ว ตรงกับวัตถุประสงค์ที่จ่ายจริง</span></label>';}
 document.addEventListener('change',e=>{const t=e.target;if(t.dataset.review)updateField(t.dataset.bill,t.dataset.review,t.type==='checkbox'?t.checked:t.value);});
 function billOptionsHtml(excludeId){
   let h = '<option value="pool">-- ไม่ระบุ (พักไว้) --</option><option value="new">➕ สร้างรายการใหม่</option>';
@@ -458,11 +465,31 @@ function billOptionsHtml(excludeId){
 function fmt(n){ return (n==null?0:Number(n)).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 
 function companySelect(b){
- return '<div class="field"><label>บริษัทที่เบิก</label><select data-company-bill="'+b.id+'"><option value="">เลือกบริษัท</option>'+D.companies.map(c=>'<option value="'+c.id+'"'+(c.id===b.company_id?' selected':'')+'>'+c.label+'</option>').join('')+'</select></div><label><input type="checkbox" data-receipt-bill="'+b.id+'"'+(b.receipt_requested?' checked':'')+'> ขอใบแทนใบเสร็จ</label>';
+ return '<div class="field"><label>บริษัทที่เบิก</label><select data-company-bill="'+b.id+'"><option value="">เลือกบริษัท</option>'+D.companies.map(c=>'<option value="'+c.id+'"'+(c.id===b.company_id?' selected':'')+'>'+c.label+'</option>').join('')+'</select></div><label class="check-row"><input type="checkbox" data-receipt-bill="'+b.id+'"'+(b.receipt_requested?' checked':'')+'><span>ขอใบแทนใบเสร็จ</span></label>';
 }
 async function setAllCompany(value){if(!value)return;const r=await api('company-all',{company_id:value});if(!r.ok)toast(r.error,true);await refresh();}
 document.addEventListener('change',e=>{if(e.target.dataset.receiptBill)updateField(e.target.dataset.receiptBill,'receipt_requested',e.target.checked);if(e.target.dataset.companyBill)updateField(e.target.dataset.companyBill,'company_id',e.target.value);});
+function missingDetails(){
+ if(!D.bills.length)return 'เพิ่มรายการก่อนบันทึก';
+ for(let i=0;i<D.bills.length;i++){const b=D.bills[i],m=[];
+ if(!D.companies.some(c=>c.id===b.company_id))m.push('บริษัท');
+ if(!String(b.ai_detail||'').trim())m.push('ชื่อรายการ');
+ if(!Number.isFinite(Number(b.amount))||Number(b.amount)<=0)m.push('ยอดมากกว่า 0');
+ if(!D.cats.includes(b.category))m.push('หมวด');
+ const date=new Date((b.expense_date||'')+'T00:00:00Z');
+ if(!b.expense_date||isNaN(date)||date.toISOString().slice(0,10)!==b.expense_date)m.push('วันที่ใช้จ่าย');
+ if(!['เงินสด','เงินโอน','บัตรเครดิต'].includes(b.pay_type))m.push('วิธีจ่าย');
+ if(b.purpose_confirmed!==true)m.push('ติ๊กยืนยันรายละเอียด');
+ if(m.length)return 'บิล '+(i+1)+': ยังขาด '+m.join(', ');
+ }return '';
+}
+function updateConfirmState(){
+ const button=document.getElementById('confirmButton'),hint=document.getElementById('confirmHint');if(!button||!hint)return;
+ const missing=missingDetails();button.disabled=!!missing||pendingRequests>0||submitting;
+ hint.textContent=submitting?'กำลังส่งรายการ…':pendingRequests?'กำลังบันทึกการแก้ไข…':missing||'ตรวจครบแล้ว พร้อมยืนยันบันทึก';
+}
 function render(){
+  updateConfirmState();
   const total = D.bills.reduce((a,b)=>a+(b.amount||0),0);
   const nWarn = D.bills.filter(b=>b.warn).length;
   document.getElementById('heroTotal').textContent = fmt(total);
@@ -503,6 +530,7 @@ function render(){
                 D.cats.map(c=>'<option value="'+c+'"'+(c===b.category?' selected':'')+'>'+c+'</option>').join('')+
               '</select></div>'+
           '</div>'+
+          purposeCheck(b)+
           (b.warn?'<div class="flag-line">⚠️ '+b.warn+'</div>':'')+
           (b.no_receipt_reason?'<div class="norc-line">📝 ไม่มีใบเสร็จ: '+b.no_receipt_reason.replace(/</g,'&lt;')+'</div>':'')+
           '<div class="thumbs">'+ b.memberIds.map(id=>thumbHtml(id,b.id)).join('') +'</div>'+
@@ -602,10 +630,12 @@ async function addBlank(){
 }
 async function doConfirm(){
   await apiQueue;
-  if (D.bills.length===0) { toast('ยังไม่มีรายการให้บันทึก'); return; }
+  if(submitting)return;
+  const missing=missingDetails();if(missing){toast(missing,true);return;}
   if (!confirm('ยืนยันบันทึก '+D.bills.length+' รายการเข้าระบบ?')) return;
-  const r = await api('confirm-web', {});
-  if (!r.ok) { toast(r.error||'บันทึกไม่สำเร็จ', true); return; }
+  submitting=true;updateConfirmState();
+  let r;try{r=await api('confirm-web', {});}catch(e){submitting=false;updateConfirmState();toast('เชื่อมต่อไม่สำเร็จ ตรวจสถานะในแชทก่อนลองใหม่',true);return;}
+  if (!r.ok) { submitting=false;updateConfirmState();toast(r.error||'บันทึกไม่สำเร็จ', true); return; }
   document.body.innerHTML = '<div style="padding:70px 24px;text-align:center;font-family:inherit;background:#F5F3EF;min-height:100vh">'+
     '<div style="width:64px;height:64px;border-radius:50%;background:#2F7D4F1a;display:flex;align-items:center;justify-content:center;'+
     'font-size:30px;margin:0 auto 16px">✅</div>'+

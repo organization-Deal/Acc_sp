@@ -270,6 +270,10 @@ export function buildResultCard(mode, materialized, refs) {
       `**${i + 1}. ${b.category || '-'}** · ${companyOf(b.company_id)?.label || "ยังไม่เลือกบริษัท"}${ref}\n${b.ai_detail || '-'} · ยอด **${money(b.amount)}** บ.` } });
   });
   el.push({ tag: 'hr' });
+  if (mode === 'error') {
+    el.push({tag:'div',text:{tag:'lark_md',content:'⚠️ **บันทึกไม่ครบหรือยังยืนยันผลไม่ได้** เก็บบิลไว้แล้ว กรุณาให้บัญชีตรวจรายการก่อนส่งซ้ำ'}});
+    return {config:{wide_screen_mode:true},header:{template:'red',title:{tag:'plain_text',content:'⚠️ บันทึกไม่สำเร็จครบทุกใบ'}},elements:el};
+  }
   if (mode === 'saving') {
     el.push({ tag: 'div', text: { tag: 'lark_md', content: `⏳ **กำลังบันทึก ${materialized.length} รายการ...**` } });
     return { config: { wide_screen_mode: true },

@@ -434,8 +434,13 @@ export class SessionDO extends DurableObject {
       return;
     }
     let refs;
-    try {refs = await saveBills(this.env, emp, materialized);}
-    catch(err){s.saveError=String(err.message||err);await this.#save(s);await reply(this.env,openId,'⚠️ บันทึกไม่ครบหรือยังยืนยันผลไม่ได้ กรุณาให้บัญชีตรวจรายการใน Lark ก่อนส่งใหม่ เพื่อไม่ให้ซ้ำ: '+s.saveError);return;}
+    try {refs = await saveBills(this.env, emp, materialized, async saved => {
+      s.savedRecords = [...(s.savedRecords || []), saved];
+      await this.#save(s);
+    });}
+    catch(err){s.saveError=String(err.message||err);s.failedBills=materialized;await this.#save(s);
+      if(s.cardmsg) {try {await patchMessage(this.env,s.cardmsg,buildResultCard('error',materialized,(s.savedRecords||[]).map(r=>r.ref)));}catch(notifyError){console.log('Failed to update error card');}}
+      await reply(this.env,openId,'⚠️ บันทึกไม่ครบหรือยังยืนยันผลไม่ได้ กรุณาให้บัญชีตรวจรายการใน Lark ก่อนส่งใหม่ เพื่อไม่ให้ซ้ำ: '+s.saveError);return;}
     if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildResultCard('done', materialized, refs));
     await this.ctx.storage.delete('session');
     await reply(this.env, openId, `✅ บันทึกแล้ว ${materialized.length} รายการ:\n` +

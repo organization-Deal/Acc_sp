@@ -44,12 +44,13 @@ export async function larkToken(env) {
   return tok;
 }
 
-async function larkPost(env, path, payload) {
+async function larkPost(env, path, payload, strict = false) {
   const res = await fetch(CFG.LARK_HOST + path, {
     method: 'POST', headers: { Authorization: 'Bearer ' + (await larkToken(env)), 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   });
   const out = await res.json();
+  if (strict && (!res.ok || out.code !== 0)) throw new Error('Lark บันทึกไม่สำเร็จ (HTTP '+res.status+', code '+out.code+'): '+(out.msg||'ไม่ทราบสาเหตุ'));
   if (out.code && out.code !== 0) console.log('❌ Lark POST ' + path + ' → code ' + out.code + ' : ' + out.msg);
   return out;
 }
@@ -161,7 +162,7 @@ ai_detail: ถ้าเป็นสลิปให้ว่าง ถ้าเ�
 // ════════════════════════════════════════════════════════════════
 // บันทึกเข้า "คำขอเบิกเงิน"
 // ════════════════════════════════════════════════════════════════
-export async function saveBills(env, emp, bills) {
+export async function saveBills(env, emp, bills, onSaved = async () => {}) {
   const error=validateBills(bills);if(error)throw new Error(error);
   const refs = [];
   for (const b of bills) {
@@ -201,9 +202,11 @@ export async function saveBills(env, emp, bills) {
     if (b.no_receipt_reason) noteParts.push(`📝 ไม่มีใบเสร็จ: ${b.no_receipt_reason}`);
     if (noteParts.length) f[CFG.F.NOTE] = noteParts.join(' | ');
 
-    const r = await larkPost(env, `/open-apis/bitable/v1/apps/${CFG.BASE_TOKEN}/tables/${CFG.T_EXPENSE}/records`, { fields: f });
-    let ref = '(เลขกำลังสร้าง)';
-    try { ref = extract(r.data.record.fields[CFG.F.DOC_NO]) || ref; } catch (e) {}
+    const r = await larkPost(env, `/open-apis/bitable/v1/apps/${CFG.BASE_TOKEN}/tables/${CFG.T_EXPENSE}/records`, { fields: f }, true);
+    const record = r.data?.record;
+    if (!record?.record_id) throw new Error('Lark ไม่คืน record_id ยังยืนยันการบันทึกไม่ได้ กรุณาตรวจรายการก่อนลองใหม่');
+    const ref = extract(record.fields?.[CFG.F.DOC_NO]) || record.record_id;
+    await onSaved({index:refs.length,record_id:record.record_id,ref});
     refs.push(ref);
   }
   return refs;

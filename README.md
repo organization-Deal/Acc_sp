@@ -1,78 +1,75 @@
-# ReceiptBot — Cloudflare Worker + Durable Object
+# ReceiptBot — Flow แยกบริษัท (17 พฤศจิกายน 2569)
 
-พอร์ตมาจาก `ReceiptBot.gs` (Google Apps Script) → Cloudflare Workers
-Logic เหมือนเดิมเป๊ะ เปลี่ยนแค่ layer I/O ให้เร็วขึ้น
+สถานะ: แก้ source จาก Acc_sp-main.zip และทดสอบอัตโนมัติแล้ว ยังไม่ได้ Deploy หรือทดสอบส่งบิลจริงผ่านบอท
 
-## ทำไมเร็วขึ้น
-| ของช้าใน Apps Script | ของใหม่ใน Worker |
-|---|---|
-| `PropertiesService` (state) | Durable Object storage + KV |
-| `LockService.waitLock(25s)` | Durable Object = serialize ต่อ user อัตโนมัติ |
-| trigger `flushJobs` (ดีเลย์) | `ctx.waitUntil()` = ทำทันทีหลังตอบ 200 |
-| cold start GAS | Worker cold start ~0ms |
+## Flow ใหม่
 
-## โครงไฟล์
-```
-wrangler.toml     ← config + KV + DO binding
-src/config.js     ← CFG + 54 หมวด (CAT_TABLE)
-src/domain.js     ← logic ล้วน: classify, group bills, การ์ด, html
-src/lark.js       ← I/O: Lark API, Claude OCR, Bitable
-src/index.js      ← Worker entry + SessionDO (Durable Object)
-```
+1. ส่งรูปเข้าแชทตามเดิม → OCR → จัดบิลร่าง
+2. เปิด “จัดบิล/แก้ไข” แล้วเลือกบริษัทต่อบิล หรือเลือกบริษัทให้ทุกบิลในชุดปัจจุบัน
+3. การ์ดแสดงบริษัททุกบิล บิลที่ยังไม่เลือกบริษัทจะยืนยันไม่ได้
+4. ยืนยัน → บันทึกบริษัทลงช่อง `บริษัทที่เบิก` ของแต่ละ record ในคำขอเบิกเงิน
+5. Apps Script รับ record ไปแยกรอบตามบริษัท + พนักงาน + สกุลเงิน แล้วสร้างเอกสารตามบริษัท
 
-## Setup (ครั้งแรก)
+ขั้นที่ 5 เป็นข้อกำหนดของ Apps Script ปลายทาง ไม่ได้แก้หรือ deploy Apps Script ใน ZIP นี้ ต้องตรวจให้ production ใช้เวอร์ชัน multi-company ก่อนเปิดใช้จริง
 
-### 1. ติดตั้ง + login
-```bash
+## บริษัทและชื่อช่องจริง
+
+| รหัส | ชื่อบริษัท | ค่าที่เขียนลง บริษัทที่เบิก |
+|---|---|---|
+| PSH | บริษัท โปรเซอร์วิส โฮม โซลูชั่น จำกัด | ชื่อเต็มเดียวกัน |
+| PWA | บริษัท พรอสเพอร์ เวลธี่ เอสเซท จำกัด | ชื่อเต็มเดียวกัน |
+| ODP | บริษัท ออมนิ แดช เพย์ วอลเล็ต จำกัด | บจก. ออมนิ แดช เพย์ วอลเลต |
+
+ทะเบียนอยู่ใน `src/companies.js` ตรวจตัวเลือกจาก Lark จริงแล้ว ไม่มีการเดาบริษัทจาก OCR หรือชื่อพนักงาน และไม่ตั้งบริษัทเดิมเป็นค่าเริ่มต้นให้บิลใหม่
+
+## คำสั่งแชท
+
+- `บริษัท PSH` — เปลี่ยนทุกบิลที่มีอยู่ในชุดปัจจุบันเป็น PROSERVICE
+- `บริษัท PWA` — เปลี่ยนทุกบิลเป็น PROSPER
+- `บริษัท ODP` — เปลี่ยนทุกบิลเป็น OMNI
+- `บิล 2 บริษัท ODP` — เปลี่ยนเฉพาะบิลที่ 2
+- รองรับชื่อย่อ PROSERVICE / PROSPER / OMNI แทนรหัสด้วย
+
+เลือกรายบริษัทในหน้าเว็บได้ และดูบริษัทบนการ์ดก่อนยืนยัน บิลไม่มีรูปใช้กติกาเดียวกัน
+
+## การจับรูปและใบแทนใบเสร็จ
+
+- ไม่รวมรูปอัตโนมัติเมื่อบริษัทต่างกัน หรือรูปหนึ่งทราบบริษัทแต่อีกรูปยังไม่ทราบ
+- ถ้ามีหลายบิลที่ยอดและเงื่อนไขตรงกัน รูปจะเข้ากองพักให้จัดเอง
+- รูปที่ยังไม่ทราบบริษัททั้งคู่ยังรวมได้เมื่อมีผู้สมัครเพียงบิลเดียว ผู้ใช้ต้องตรวจชุดรูปและเลือกบริษัทก่อนยืนยัน
+- การย้ายรูปข้ามบริษัทที่ระบุแล้วจะถูกปฏิเสธ ต้องตรวจและแก้บริษัทก่อน
+- ติ๊กทำใบแทนเมื่อไม่มีรูปใบเสร็จ หรือเมื่อผู้ใช้เลือกขอใบแทนเพิ่มในหน้าแก้ไข ไม่ติ๊กทุกบิลเหมือนเดิม
+- ฟีเจอร์นี้เป็นเงื่อนไขการสร้างเอกสาร ไม่ใช่การรับรองความครบถ้วนทางภาษีของรูปใบเสร็จ
+
+## แมตสลิป
+
+เลือกบริษัทผู้จ่ายก่อนแมต หนึ่งชุดแมตใช้หนึ่งบริษัท ส่งสลิปแยกชุดตามบริษัท ระบบกรองบริษัทก่อนเทียบยอด/บัญชี/ชื่อ และตรวจบริษัทของ record ซ้ำฝั่ง server ก่อนแนบสลิปและติ๊กรายการสำเร็จ
+
+- คู่ค้า: อ่าน `ชื่อบริษัท`
+- สรุปเบิกภายใน: อ่าน `บริษัท`
+- DEALPAY: เตรียมอ่าน `บริษัท` แต่ ณ วันที่ตรวจ ตารางจริงยังไม่มีช่องนี้ ต้องเพิ่มช่องและระบุบริษัทที่ตรวจแล้วก่อนใช้ รายการที่ไม่มีบริษัทหรือชื่อไม่ตรงทะเบียนจะไม่ถูกแมต
+- ชื่อ/ยอดซ้ำที่ยังแยกไม่ได้จะรอคนตรวจ ไม่มีการหยิบรายการแรกอัตโนมัติ
+
+## ขอบเขตและข้อจำกัด
+
+- บอทคำขอเบิกชุดนี้ยังเป็น THB ตาม flow เดิม เขียนตัวเลือก `Thai Baht (THB) ` ตามชื่อจริงใน Lark ไม่ได้เพิ่มการเบิกหลายสกุลเงิน
+- ไม่ได้แก้ปัญหา Apps Script สร้างไฟล์ซ้ำ, trigger, deployment เก่า หรือรวมโปรเจกต์ Apps Script ในงานนี้
+- กลไกบันทึกหลาย record และ retry เดิมยังไม่ใช่ exactly-once หากเครือข่ายขาดหลังบันทึกบางรายการ ต้องตรวจ Bitable ก่อนลองใหม่เพื่อป้องกันคำขอซ้ำ
+- ไม่มีการสร้าง record ทดสอบหรือเปลี่ยน schema ของ Lark ในการแก้ครั้งนี้
+
+## ตรวจและนำขึ้นระบบ
+
+```sh
+npm test
 npm install
-npx wrangler login
-```
-
-### 2. สร้าง KV แล้วเอา id ใส่ wrangler.toml
-```bash
-npx wrangler kv namespace create STATE
-```
-เอา `id` ที่ได้ ไปแทน `REPLACE_WITH_KV_ID` ใน `wrangler.toml`
-
-### 3. ใส่ secret
-```bash
-npx wrangler secret put CLAUDE_KEY        # sk-ant-...
-npx wrangler secret put LARK_APP_SECRET
-```
-> ✅ **ฟรีได้** — โค้ดนี้ใช้ Durable Object แบบ SQLite (`new_sqlite_classes`) ซึ่งอยู่ใน
-> Workers **Free plan** แล้ว ไม่ต้องจ่าย $5
-> (โควตา/ราคาเปลี่ยนได้ เช็คหน้า pricing ล่าสุดก่อน deploy)
-
-### 4. deploy ครั้งแรก
-```bash
+npx wrangler deploy --dry-run
 npx wrangler deploy
 ```
-จะได้ URL เช่น `https://receiptbot.xxx.workers.dev`
-→ เอา URL นี้ไปแก้ `WORKER_URL` ใน `wrangler.toml` แล้ว **deploy ซ้ำอีกที**
-(WORKER_URL ใช้ทำลิงก์ปุ่มในการ์ด ต้องตรง ไม่งั้นปุ่มพัง)
 
-### 5. ตั้งค่าฝั่ง Lark (Developer Console)
-- **Event Subscription** → Request URL = `https://receiptbot.xxx.workers.dev`
-  (โค้ด handle `url_verification` ให้แล้ว กด verify ผ่านเลย)
-  Subscribe event: `im.message.receive_v1`
-- **Permissions**: `im:message`, `im:message:send_as_bot`, `im:resource`,
-  `bitable:app`, `drive:drive`
-- เพิ่ม app เป็น collaborator (**Can edit**) ใน Lark Base
-- ปุ่มการ์ดใช้ open_url อยู่แล้ว ไม่ต้องตั้ง card callback URL แยก
+ใช้ Worker เดิม `accsp2026` และ KV/DO binding เดิมใน `wrangler.toml` อย่าสร้าง namespace หรือ Worker ใหม่สำหรับอัปเดตนี้ รักษา secrets เดิม (`LARK_APP_SECRET`, `CLAUDE_KEY` และตัวอื่นที่ระบบเดิมใช้) ไว้ ก่อน deploy เปรียบเทียบ source ใน ZIP กับ production ที่อาจมีการแก้ใหม่กว่า
 
-### 6. ต่อ GitHub auto-deploy
-- push repo ขึ้น GitHub
-- Cloudflare Dashboard → Workers → เลือก worker → **Settings → Builds → Connect**
-- เลือก repo → ทุก push = deploy อัตโนมัติ
-- ตั้ง secret ซ้ำใน dashboard (Settings → Variables and Secrets) เพราะ build ฝั่ง CF ไม่เห็น secret จาก CLI
+ควรทดสอบจริงด้วยพนักงานคนเดียว 3 บิลต่างบริษัท ยืนยันว่ามี 3 records บริษัทถูกต้อง และ Apps Script แยกเป็น 3 รอบ/เอกสารถูกบริษัท รวมทั้งทดสอบกดยืนยันซ้ำและกรณีบันทึกขัดข้องก่อนเปิดใช้งานทั่วไป
 
-## เทสต์ว่าติด
-- เปิด `https://receiptbot.xxx.workers.dev` → ต้องเห็น `"version":"CF_WORKER_v1"`
-- ดู log สด: `npx wrangler tail`
-- ส่งรูปบิลในแชทบอท → การ์ดต้องเด้งภายในไม่กี่วิ
+## โค้ดต้นฉบับก่อนปรับ
 
-## หมายเหตุ
-- พนักงานยังต้องพิมพ์ `id` เอา open_id ไปใส่คอลัมน์ `Lark open_id` ในตารางพนักงาน (เหมือนเดิม)
-- ต่อกับ autoBatch v5.0 เหมือนเดิม: ยิงเข้าตารางด้วยสถานะ `ยังไม่ได้จัดทำเอกสาร`
-- ตัวนี้รันบน Free plan ได้ (SQLite DO) — ถ้าไม่อยากพึ่ง DO เลย มีเวอร์ชัน KV-only
-  ให้ได้ แต่เสี่ยง double-card ตอนส่งรูปพร้อมกันเป๊ะๆ (ปกติไม่ต้องใช้)
+รายละเอียดเดิมเก็บใน `README.original.md` คำแนะนำ setup เดิมเป็นการสร้างระบบใหม่ ไม่ใช่ขั้นตอนอัปเดต Worker นี้

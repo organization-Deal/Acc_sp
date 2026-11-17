@@ -1,3 +1,4 @@
+import { COMPANIES, companyOf } from './companies.js';
 // ════════════════════════════════════════════════════════════════
 // domain.js — logic ล้วน ไม่มี I/O
 // v2: รองรับโยนรูปทีเดียวหลายสิบใบ — จับคู่สะสม (ไม่รีเซ็ตทุกครั้ง) +
@@ -62,7 +63,7 @@ function recomputeBill(state, bill) {
   bill.anchorId = anchor ? anchor.message_id : (bill.anchorId || null);
 
   const amtSrc = receipts.find(m => m.amount != null) || members.find(m => m.amount != null);
-  bill.amount = amtSrc ? amtSrc.amount : (bill.amount ?? null);
+  bill.amount = bill.amountLocked ? bill.amount : amtSrc ? amtSrc.amount : (bill.amount ?? null);
   const slip = members.find(m => (m.role === 'PAYSLIP' || m.role === 'PROOF') && m.amount != null);
   bill.pay_amount = slip ? slip.amount : null;
   bill.mismatch = bill.amount != null && bill.pay_amount != null &&
@@ -89,7 +90,8 @@ export function mergeItem(state, item) {
   const isBillish = item.amount != null && (item.role === 'RECEIPT' || item.role === 'PAYSLIP' || item.role === 'PROOF');
   if (!isBillish) { state.pool.push(item.message_id); return; }
 
-  const existing = state.bills.find(b => {
+  const candidates = state.bills.filter(b => {
+    if ((b.company_id || null) !== (item.company_id || null)) return false;
     const matchAmount = (b.amount != null && Math.abs(b.amount - item.amount) <= CFG.AMOUNT_TOLERANCE) ||
                          (b.pay_amount != null && Math.abs(b.pay_amount - item.amount) <= CFG.AMOUNT_TOLERANCE);
     if (!matchAmount) return false;
@@ -97,11 +99,13 @@ export function mergeItem(state, item) {
     return !dup;
   });
 
+  if (candidates.length > 1) { state.pool.push(item.message_id); return; }
+  const existing = candidates[0];
   if (existing) {
     existing.memberIds.push(item.message_id);
     recomputeBill(state, existing);
   } else {
-    const bill = { id: genId(), memberIds: [item.message_id], anchorId: item.message_id,
+    const bill = { id: genId(), company_id: item.company_id || null, memberIds: [item.message_id], anchorId: item.message_id,
       amount: null, pay_amount: null, category: '', cat_code: '', ai_detail: '', pay_type: '',
       mismatch: false, warn: '', categoryLocked: false };
     recomputeBill(state, bill);
@@ -117,10 +121,18 @@ export function removeFromAll(state, msgId) {
 }
 export function assignItem(state, msgId, target) {
   if (!state.itemsById[msgId]) return { ok: false, error: 'ไม่พบรูปนี้ (อาจถูกจัดไปแล้ว)' };
+  const source = state.bills.find(b=>b.memberIds.includes(msgId));
+  if (source?.id === target) return {ok:true};
+  const sourceCompany = source?.company_id || state.itemsById[msgId].company_id || null;
+  const destination = state.bills.find(b=>b.id===target);
+  if(target!=='pool' && target!=='new' && !destination) return {ok:false,error:'ไม่พบบิลปลายทาง'};
+  if(destination && sourceCompany && destination.company_id && sourceCompany!==destination.company_id)
+    return {ok:false,error:'รูปอยู่คนละบริษัท กรุณาตรวจและเปลี่ยนบริษัทก่อนย้าย'};
+  state.itemsById[msgId].company_id = sourceCompany;
   removeFromAll(state, msgId);
   if (target === 'pool') { state.pool.push(msgId); return { ok: true }; }
   if (target === 'new') {
-    const bill = { id: genId(), memberIds: [msgId], anchorId: msgId,
+    const bill = { id: genId(), company_id: sourceCompany, memberIds: [msgId], anchorId: msgId,
       amount: null, pay_amount: null, category: '', cat_code: '', ai_detail: '', pay_type: '',
       mismatch: false, warn: '', categoryLocked: false };
     recomputeBill(state, bill);
@@ -129,6 +141,7 @@ export function assignItem(state, msgId, target) {
   }
   const bill = state.bills.find(b => b.id === target);
   if (!bill) return { ok: false, error: 'ไม่พบบิลนี้ (อาจถูกลบไปแล้ว)' };
+  bill.company_id = bill.company_id || sourceCompany;
   bill.memberIds.push(msgId);
   recomputeBill(state, bill);
   return { ok: true };
@@ -137,7 +150,13 @@ export function assignItem(state, msgId, target) {
 export function updateBill(state, billId, patch) {
   const bill = state.bills.find(b => b.id === billId);
   if (!bill) return { ok: false, error: 'ไม่พบบิลนี้' };
-  if (patch.amount !== undefined) bill.amount = num(patch.amount);
+  if (patch.company_id !== undefined) {
+    if(!companyOf(patch.company_id)) return {ok:false,error:'บริษัทไม่ถูกต้อง'};
+    bill.company_id=patch.company_id;
+    bill.memberIds.forEach(id=>{if(state.itemsById[id])state.itemsById[id].company_id=patch.company_id;});
+  }
+  if (patch.receipt_requested !== undefined) bill.receipt_requested=patch.receipt_requested===true;
+  if (patch.amount !== undefined) { bill.amount = num(patch.amount); bill.amountLocked = true; }
   if (patch.ai_detail !== undefined) bill.ai_detail = String(patch.ai_detail).trim();
   if (patch.category !== undefined && patch.category) {
     bill.category = patch.category; bill.cat_code = codeOf(patch.category); bill.categoryLocked = true;
@@ -176,6 +195,7 @@ export function attachItemToBill(state, billId, item) {
 // ── แปลงเป็นรูปแบบเดิมที่ saveBills() ใน lark.js ใช้ (มี .anchor / .members เต็ม) ──
 export function materializeBills(state) {
   return state.bills.map(b => ({
+    company_id: b.company_id || null, receipt_requested: b.receipt_requested === true,
     anchor: state.itemsById[b.anchorId] || {},
     members: b.memberIds.map(id => state.itemsById[id]).filter(Boolean),
     amount: b.amount, pay_amount: b.pay_amount, category: b.category, cat_code: b.cat_code,
@@ -210,7 +230,7 @@ export function buildCard(openId, state, opts) {
     const noRc = b.no_receipt_reason ? `\n📝 ไม่มีใบเสร็จ: ${b.no_receipt_reason}` : '';
     const pay = b.pay_type ? ` · จ่าย:${b.pay_type}` : '';
     el.push({ tag: 'div', text: { tag: 'lark_md', content:
-      `**${i + 1}. ${cat}**\n${b.ai_detail || '-'}\nยอด **${money(b.amount)}** บ.${pay} · ${b.memberIds.length} รูป` + warn + noRc } });
+      `**${i + 1}. ${cat}**\n🏢 ${companyOf(b.company_id)?.label || "ยังไม่เลือกบริษัท"}\n${b.ai_detail || '-'}\nยอด **${money(b.amount)}** บ.${pay} · ${b.memberIds.length} รูป` + warn + noRc } });
   });
   el.push({ tag: 'hr' });
   el.push({ tag: 'div', text: { tag: 'lark_md', content: `รวม **${bills.length} รายการ** · **${money(total)}** บ.` } });
@@ -239,7 +259,7 @@ export function buildResultCard(mode, materialized, refs) {
     total += (b.amount || 0);
     const ref = (refs && refs[i]) ? `  ·  ${refs[i]}` : '';
     el.push({ tag: 'div', text: { tag: 'lark_md', content:
-      `**${i + 1}. ${b.category || '-'}**${ref}\n${b.ai_detail || '-'} · ยอด **${money(b.amount)}** บ.` } });
+      `**${i + 1}. ${b.category || '-'}** · ${companyOf(b.company_id)?.label || "ยังไม่เลือกบริษัท"}${ref}\n${b.ai_detail || '-'} · ยอด **${money(b.amount)}** บ.` } });
   });
   el.push({ tag: 'hr' });
   if (mode === 'saving') {
@@ -280,7 +300,7 @@ export function htmlPage(title, msg) {
 // ════════════════════════════════════════════════════════════════
 export function sortPageHtml(openId, tok, workerUrl, state) {
   const bills = state.bills.map(b => ({
-    id: b.id, amount: b.amount, category: b.category, ai_detail: b.ai_detail,
+    id: b.id, company_id:b.company_id||null, receipt_requested:b.receipt_requested===true, amount: b.amount, category: b.category, ai_detail: b.ai_detail,
     warn: b.warn, memberIds: b.memberIds, no_receipt_reason: b.no_receipt_reason || null,
   }));
   const pool = state.pool;
@@ -289,7 +309,7 @@ export function sortPageHtml(openId, tok, workerUrl, state) {
     const it = state.itemsById[id];
     itemsMeta[id] = { role: it.role, amount: it.amount, vendor: it.vendor };
   });
-  const initData = JSON.stringify({ bills, pool, itemsMeta, openId, tok, workerUrl, cats: COMMON_CATS });
+  const initData = JSON.stringify({ bills, pool, itemsMeta, openId, tok, workerUrl, companies: COMPANIES, cats: COMMON_CATS });
 
   return `<!doctype html><html><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,maximum-scale=1">
@@ -387,6 +407,7 @@ export function sortPageHtml(openId, tok, workerUrl, state) {
   <div id="heroWarn"></div>
 </div>
 <div class="group-label"><span>รายการ</span></div>
+<div class="field"><label>ตั้งบริษัทให้ทุกบิลในชุดนี้</label><select id="allCompany" onchange="setAllCompany(this.value)"><option value="">เลือกบริษัท</option>${COMPANIES.map(c=>`<option value="${c.id}">${c.label}</option>`).join('')}</select></div>
 <div id="bills" class="list"></div>
 <div class="group-label"><span id="poolLabel">รูปที่ยังไม่ได้จัด</span> <label class="act">＋ อัปโหลดรูป<input type="file" accept="image/*" style="display:none" onchange="uploadEvidence(this.files[0],'pool')"></label></div>
 <div id="pool" class="pool-grid"></div>
@@ -429,6 +450,11 @@ function billOptionsHtml(excludeId){
 
 function fmt(n){ return (n==null?0:Number(n)).toLocaleString('th-TH',{minimumFractionDigits:2,maximumFractionDigits:2}); }
 
+function companySelect(b){
+ return '<div class="field"><label>บริษัทที่เบิก</label><select data-company-bill="'+b.id+'"><option value="">เลือกบริษัท</option>'+D.companies.map(c=>'<option value="'+c.id+'"'+(c.id===b.company_id?' selected':'')+'>'+c.label+'</option>').join('')+'</select></div><label><input type="checkbox" data-receipt-bill="'+b.id+'"'+(b.receipt_requested?' checked':'')+'> ขอใบแทนใบเสร็จ</label>';
+}
+async function setAllCompany(value){if(!value)return;const r=await api('company-all',{company_id:value});if(!r.ok)toast(r.error,true);await refresh();}
+document.addEventListener('change',e=>{if(e.target.dataset.receiptBill)updateField(e.target.dataset.receiptBill,'receipt_requested',e.target.checked);if(e.target.dataset.companyBill)updateField(e.target.dataset.companyBill,'company_id',e.target.value);});
 function render(){
   const total = D.bills.reduce((a,b)=>a+(b.amount||0),0);
   const nWarn = D.bills.filter(b=>b.warn).length;
@@ -450,13 +476,13 @@ function render(){
       const desc = (b.ai_detail||'') + (b.memberIds.length?' · '+b.memberIds.length+' รูป':'');
       div.innerHTML =
         '<div class="row-head">'+
-          '<div class="row-main">'+cat+
+          '<div class="row-main">'+cat+'<div>🏢 '+(D.companies.find(c=>c.id===b.company_id)?.label||'ยังไม่เลือกบริษัท')+'</div>'+
             (b.warn?'<span class="row-flag"></span>':'')+
             '<div class="row-desc">'+ (desc||'—') +'</div>'+
           '</div>'+
           '<div class="row-amt num">฿'+fmt(b.amount)+'</div>'+
         '</div>'+
-        '<div class="detail"><div class="detail-inner">'+
+        '<div class="detail"><div class="detail-inner">'+companySelect(b)+
           '<div class="field"><label>ชื่อรายการ</label>'+
             '<input type="text" value="'+(b.ai_detail||'').replace(/"/g,'&quot;')+'" placeholder="เช่น ค่ากาแฟรับรองลูกค้า" '+
             'onchange="updateField(\\''+b.id+'\\',\\'ai_detail\\',this.value)"></div>'+

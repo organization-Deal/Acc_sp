@@ -1,3 +1,4 @@
+import { companyOf, companyError } from './companies.js';
 // ════════════════════════════════════════════════════════════════
 // index.js — Worker entry + SessionDO
 //
@@ -254,6 +255,16 @@ export class SessionDO extends DurableObject {
     const s = await this.#load();
     s.openId = openId;
 
+    const companyCommand=t.match(/^(?:บิล\s*(\d+)\s+)?บริษัท\s+(PSH|PWA|ODP|PROSERVICE|PROSPER|OMNI)$/i);
+    if(companyCommand){
+      const aliases={PROSERVICE:'PSH',PROSPER:'PWA',OMNI:'ODP'};
+      const raw=companyCommand[2].toUpperCase(),id=aliases[raw]||raw;
+      const targets=companyCommand[1]?[s.state.bills[Number(companyCommand[1])-1]].filter(Boolean):s.state.bills;
+      if(!targets.length){await reply(this.env,openId,'ไม่พบบิล กรุณาส่งบิลก่อน');return;}
+      targets.forEach(b=>updateBill(s.state,b.id,{company_id:id}));await this.#save(s);
+      if(s.cardmsg)await patchMessage(this.env,s.cardmsg,buildCard(openId,s.state,this.#opts(s)));
+      await reply(this.env,openId,'ตั้งบริษัท '+companyOf(id).label+' ให้ '+targets.length+' บิลแล้ว');return;
+    }
     if (t === 'id') { await reply(this.env, openId, 'open_id: ' + openId); return; }
 
     // ── ตอบคำถาม "มีใบเสร็จไหม" ของรายการที่พิมพ์ไว้ก่อนหน้า ──
@@ -396,6 +407,8 @@ export class SessionDO extends DurableObject {
   async #prepareConfirm(s) {
     const bills = s.state.bills;
     if (!bills.length) return { ok: false, error: 'ยังไม่มีรายการให้บันทึก' };
+    const error=companyError(bills);
+    if(error)return {ok:false,error};
     const materialized = materializeBills(s.state);
     s.tosave = materialized;
     await this.#save(s);
@@ -505,7 +518,7 @@ export class SessionDO extends DurableObject {
         itemsMeta[id] = { role: it.role, amount: it.amount, vendor: it.vendor };
       });
       return { ok: true,
-        bills: s.state.bills.map(b => ({ id: b.id, amount: b.amount, category: b.category, ai_detail: b.ai_detail, warn: b.warn, memberIds: b.memberIds, no_receipt_reason: b.no_receipt_reason || null })),
+        bills: s.state.bills.map(b => ({ id: b.id, company_id:b.company_id||null, receipt_requested:b.receipt_requested===true, amount: b.amount, category: b.category, ai_detail: b.ai_detail, warn: b.warn, memberIds: b.memberIds, no_receipt_reason: b.no_receipt_reason || null })),
         pool: s.state.pool, itemsMeta };
     }
     if (act === 'assign') {
@@ -513,6 +526,13 @@ export class SessionDO extends DurableObject {
       if (r.ok) await this.#save(s);
       if (r.ok && s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, this.#opts(s)));
       return r;
+    }
+    if(act==='company-all'){
+      if(!companyOf(body.company_id))return {ok:false,error:'บริษัทไม่ถูกต้อง'};
+      s.state.bills.forEach(b=>updateBill(s.state,b.id,{company_id:body.company_id}));
+      await this.#save(s);
+      if(s.cardmsg)await patchMessage(this.env,s.cardmsg,buildCard(openId,s.state,this.#opts(s)));
+      return {ok:true};
     }
     if (act === 'update') {
       const r = updateBill(s.state, body.billId, body.patch || {});

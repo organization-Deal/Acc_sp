@@ -1,3 +1,4 @@
+import { companyOf, companyError, needsReceipt } from './companies.js';
 // ════════════════════════════════════════════════════════════════
 // lark.js — I/O ทั้งหมด: Lark API, Claude OCR, Bitable
 // (UrlFetchApp → fetch, CacheService/Properties → KV, base64 → btoa)
@@ -158,6 +159,7 @@ ai_detail: เขียนวัตถุประสงค์ค่าใช้
 // บันทึกเข้า "คำขอเบิกเงิน"
 // ════════════════════════════════════════════════════════════════
 export async function saveBills(env, emp, bills) {
+  const error=companyError(bills);if(error)throw new Error(error);
   const refs = [];
   for (const b of bills) {
     const att = { payslip: [], receipt: [], tax: [], evidence: [] };
@@ -171,6 +173,8 @@ export async function saveBills(env, emp, bills) {
     }
 
     const f = {};
+    f['บริษัทที่เบิก'] = (companyOf(b.company_id).expenseName || companyOf(b.company_id).name);
+    f['สกุลเงิน'] = 'Thai Baht (THB) '; 
     f[CFG.F.REQUESTER] = [emp.record_id];
     f[CFG.F.DETAIL]    = b.ai_detail || b.anchor.vendor || b.category || 'ค่าใช้จ่าย';
     if (b.ai_detail) f[CFG.F.AI_DETAIL] = b.ai_detail;
@@ -187,7 +191,7 @@ export async function saveBills(env, emp, bills) {
     if (att.receipt.length)  f[CFG.F.ATT_RECEIPT]  = att.receipt;
     if (att.tax.length)      f[CFG.F.ATT_TAX]      = att.tax;
     if (att.evidence.length) f[CFG.F.ATT_EVIDENCE] = att.evidence;
-    f[CFG.F.NO_RECEIPT] = true;
+    f[CFG.F.NO_RECEIPT] = needsReceipt(b);
     const noteParts = [];
     if (b.mismatch) noteParts.push(`⚠️ ยอดใบเสร็จ ${money(b.amount)} ≠ ยอดจ่าย ${money(b.pay_amount)} (OCR ${b.anchor.confidence || 0}%)`);
     if (b.no_receipt_reason) noteParts.push(`📝 ไม่มีใบเสร็จ: ${b.no_receipt_reason}`);

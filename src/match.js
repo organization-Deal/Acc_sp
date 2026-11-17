@@ -1,3 +1,4 @@
+import { COMPANIES, companyOf, companyFromName } from './companies.js';
 // ════════════════════════════════════════════════════════════════
 // match.js — ฟีเจอร์ "แมตยอด" (แยกตัวจาก flow ReceiptBot เดิม ไม่ชนกัน)
 //   reuse จาก lark.js: larkToken, uploadBytesToBitable
@@ -10,11 +11,11 @@ const enc = new TextEncoder(), dec = new TextDecoder();
 
 // ── 3 ตาราง + ช่อง (ชื่อ field ตรงกับที่สร้างไว้ใน Bitable) ──
 export const TABLES = {
-  partner:  { label:'คู่ค้า',   table_id:'tbldczVhrFWfJ5ze',
+  partner:  { label:'คู่ค้า',   table_id:'tbldczVhrFWfJ5ze', f_company:'ชื่อบริษัท',
               f_name:'ชื่อบริษัทคู่ค้าผู้รับเงิน', f_amount:'ยอดโอนเงิน', f_account:'เลขบัญชีผู้รับเงิน', f_currency:'สกุลเงิน' },
-  internal: { label:'ภายใน',    table_id:'tblgakFKBOvz9aCW',
+  internal: { label:'ภายใน',    table_id:'tblgakFKBOvz9aCW', f_company:'บริษัท',
               f_name:'ชื่อพนักงาน', f_amount:'ยอดรวม', f_account:'เลขบัญชี', f_currency:null },
-  dealpay:  { label:'DEALPAY',  table_id:'tblQ1irGp6iyz0Mc',
+  dealpay:  { label:'DEALPAY',  table_id:'tblQ1irGp6iyz0Mc', f_company:'บริษัท',
               f_name:'ชื่อบัญชีผู้รับเงิน', f_amount:'จำนวนเงิน', f_account:'เลขที่บัญชีธนาคาร', f_currency:null },
 };
 // ช่อง write-back (เหมือนกันทั้ง 3 ตาราง)
@@ -37,9 +38,10 @@ function nameSim(a,b){ a=normName(a);b=normName(b);if(!a||!b)return 0;if(a===b)r
   if(a.includes(b)||b.includes(a))return 0.92;const L=Math.max(a.length,b.length);return 1-lev(a,b)/L; }
 
 export function matchOne(slip, rows){
+  if(!companyOf(slip.company_id))return {status:'miss',reason:'ต้องเลือกบริษัทก่อนแมตสลิป'};
   const amt=parseAmount(slip.amount), cur=normCur(slip.currency);
   if(isNaN(amt)) return {status:'miss',reason:'อ่านยอดไม่ได้'};
-  const cands=rows.filter(r=>!r.matched && Math.abs(r.amount-amt)<0.005 && curMatch(r.currency,cur));
+  const cands=rows.filter(r=>companyOf(slip.company_id) && r.company_id===slip.company_id && !r.matched && Math.abs(r.amount-amt)<0.005 && curMatch(r.currency,cur));
   if(cands.length===0){
     const curBlock=rows.some(r=>Math.abs(r.amount-amt)<0.005 && !curMatch(r.currency,cur));
     const anyAmt=rows.some(r=>Math.abs(r.amount-amt)<0.005);
@@ -51,14 +53,14 @@ export function matchOne(slip, rows){
     if(byAcc.length===1){byAcc[0].matched=true;return {status:'ok',row:byAcc[0],by:'บัญชี'};} }
   const scored=cands.map(r=>({r,s:nameSim(r.name,slip.recipient_name)})).sort((a,b)=>b.s-a.s);
   const gap=scored.length<2?1:scored[0].s-scored[1].s;
-  if(scored[0].s>=0.85 || (scored[0].s>=0.6 && gap>=0.15)){scored[0].r.matched=true;return {status:'ok',row:scored[0].r,by:'ชื่อ'};}
+  if(scored[0].s>=0.6 && gap>=0.15){scored[0].r.matched=true;return {status:'ok',row:scored[0].r,by:'ชื่อ'};}
   return {status:'warn',cands,reason:`มี ${cands.length} รายการยอดเท่ากัน แยกด้วยบัญชี/ชื่อไม่ชัด`};
 }
 function rowFromRecord(rec, T, tableKey){
   const f=rec.fields||{};
   const val=x=>{ if(x==null)return ''; if(Array.isArray(x))return x.map(v=>v&&v.text?v.text:v).join(' ');
     if(typeof x==='object')return x.text||x.name||''; return x; };
-  return { record_id:rec.record_id, name:val(f[T.f_name]), amount:parseAmount(val(f[T.f_amount])),
+  return { company_id:companyFromName(val(f[T.f_company]))?.id || '', company:val(f[T.f_company]) || 'ยังไม่ระบุบริษัท', record_id:rec.record_id, name:val(f[T.f_name]), amount:parseAmount(val(f[T.f_amount])),
     account:digitsOnly(val(f[T.f_account])), currency:T.f_currency?normCur(val(f[T.f_currency])):'', matched:false, table:tableKey };
 }
 
@@ -153,6 +155,9 @@ export async function matchApi(act, request, env){
     for(const pr of (body.pairs||[])){
       try{
         const T=TABLES[pr.table]; if(!T) throw new Error('ตารางของรายการไม่ถูกต้อง');
+        if(!companyOf(pr.company_id))throw new Error('ต้องเลือกบริษัทก่อนแมตสลิป');
+        const current=(await listOpenRecords(env,T)).find(r=>r.record_id===pr.record_id);
+        if(!current || rowFromRecord(current,T,pr.table).company_id!==pr.company_id)throw new Error('บริษัทไม่ตรงหรือรายการเสร็จแล้ว กรุณาโหลดใหม่');
         const buf=b64ToBuf(pr.image);
         const ft=await uploadBytesToBitable(env, buf, pr.filename||'slip.jpg');   // reuse ตัวเดิม (bitable_image)
         await putRecord(env, T, pr.record_id, { [WB.slip]:[{file_token:ft}], [WB.matchedAt]:Date.now() });
@@ -208,7 +213,7 @@ table{width:100%;border-collapse:collapse;font-size:14px;margin-top:6px}th{font-
 <span class="mark">DEAL<b>!</b></span><h1>แมตยอด → เขียนกลับ Bitable</h1>
 <div class="step"><label>1 · ตาราง (ปล่อย “ทั้งหมด” ได้เลย ระบบแยกให้เอง)</label>
 <select id="table"><option value="all" selected>ทั้งหมด (auto)</option><option value="partner">คู่ค้า</option><option value="internal">ภายใน</option><option value="dealpay">DEALPAY</option></select>
-<div id="loadrows"><small class="mut">ระบบจะดึงรายการที่ยังไม่แมตจากทุกตารางมาให้เอง</small></div></div>
+<label>บริษัทผู้จ่าย <select id="company" onchange="loadRows()"><option value="">เลือกบริษัทก่อนแมต</option>${COMPANIES.map(c=>`<option value="${c.id}">${c.label}</option>`).join('')}</select></label><div id="loadrows"><small class="mut">ระบบจะดึงรายการที่ยังไม่แมตจากทุกตารางมาให้เอง</small></div></div>
 <div class="step"><label>2 · โยนสลิปโอน</label>
 <div class="drop" id="drop"><strong>ลากสลิปมาวาง</strong><p>หรือกดเลือก · <span id="count">0</span> ใบ</p></div>
 <input type="file" id="file" accept="image/*" multiple class="hidden"/><div class="thumbs" id="thumbs"></div></div>
@@ -236,18 +241,18 @@ function nN(s){return String(s||'').toLowerCase().replace(/[*.\\-_/()]/g,' ').re
 function lev(a,b){a=a||'';b=b||'';const m=a.length,n=b.length;if(!m)return n;if(!n)return m;const d=Array.from({length:m+1},(_,i)=>[i,...Array(n).fill(0)]);for(let j=0;j<=n;j++)d[0][j]=j;for(let i=1;i<=m;i++)for(let j=1;j<=n;j++){const c=a[i-1]===b[j-1]?0:1;d[i][j]=Math.min(d[i-1][j]+1,d[i][j-1]+1,d[i-1][j-1]+c);}return d[m][n];}
 function sim(a,b){a=nN(a);b=nN(b);if(!a||!b)return 0;if(a===b)return 1;if(a.includes(b)||b.includes(a))return 0.92;const L=Math.max(a.length,b.length);return 1-lev(a,b)/L;}
 function matchOne(o){const amt=pAmt(o.amount),cur=nCur(o.currency);if(isNaN(amt))return{status:'miss',reason:'อ่านยอดไม่ได้'};
- const c=refRows.filter(r=>!r.matched&&Math.abs(r.amount-amt)<0.005&&cM(r.currency,cur));
+ const c=refRows.filter(r=>$('company').value && r.company_id===$('company').value && !r.matched&&Math.abs(r.amount-amt)<0.005&&cM(r.currency,cur));
  if(c.length===0){const cb=refRows.some(r=>Math.abs(r.amount-amt)<0.005&&!cM(r.currency,cur));return{status:'miss',reason:cb?'คนละสกุลเงิน':'ไม่มียอดนี้'};}
  if(c.length===1){c[0].matched=true;return{status:'ok',row:c[0],by:'ยอด'};}
  const a=l4(o.recipient_acct);if(a){const ba=c.filter(r=>r.account&&l4(r.account)===a);if(ba.length===1){ba[0].matched=true;return{status:'ok',row:ba[0],by:'บัญชี'};}}
  const sc=c.map(r=>({r,s:sim(r.name,o.recipient_name)})).sort((x,y)=>y.s-x.s);const gap=sc.length<2?1:sc[0].s-sc[1].s;
- if(sc[0].s>=0.85||(sc[0].s>=0.6&&gap>=0.15)){sc[0].r.matched=true;return{status:'ok',row:sc[0].r,by:'ชื่อ'};}
+ if(sc[0].s>=0.6&&gap>=0.15){sc[0].r.matched=true;return{status:'ok',row:sc[0].r,by:'ชื่อ'};}
  return{status:'warn',cands:c,reason:'ยอดซ้ำ แยกไม่ชัด'};}
 async function api(act,payload){const r=await fetch('/?act='+act,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN,...payload})});return r.json();}
 async function loadRows(){$('loadrows').innerHTML='<small class="mut">กำลังดึง…</small>';
  const j=await api('match-rows',{table:$('table').value});
  if(!j.ok){$('loadrows').innerHTML='<span class="err">'+(j.error||'โหลดไม่ได้')+'</span>';return;}
- refRows=j.rows.map(x=>({...x,matched:false}));$('loadrows').innerHTML='<small class="mut">รายการที่ยังไม่แมต: '+refRows.length+' ราย</small>';updateRun();}
+ refRows=j.rows.map(x=>({...x,matched:false}));matched=[];$('results').classList.add('hidden');$('commit').disabled=true;$('loadrows').innerHTML='<small class="mut">รายการที่ยังไม่แมต: '+refRows.length+' ราย · ไม่มีบริษัทที่รู้จัก '+refRows.filter(r=>!r.company_id).length+' ราย (ต้องระบุบริษัทก่อนแมต)</small>';updateRun();}
 $('table').addEventListener('change',loadRows);
 const drop=$('drop'),fi=$('file');drop.onclick=()=>fi.click();
 ['dragover','dragenter'].forEach(e=>drop.addEventListener(e,ev=>{ev.preventDefault();drop.classList.add('over');}));
@@ -256,7 +261,7 @@ drop.addEventListener('drop',ev=>add(ev.dataTransfer.files));fi.addEventListener
 function add(list){const fs=[...list].filter(f=>f.type.startsWith('image/'));let p=fs.length;if(!p)return;
  fs.forEach(f=>{const rd=new FileReader();rd.onload=()=>{const u=rd.result;slips.push({id:crypto.randomUUID(),name:f.name,dataURL:u,base64:u.split(',')[1],mime:f.type});if(--p===0)renderThumbs();};rd.readAsDataURL(f);});}
 function renderThumbs(){const b=$('thumbs');b.innerHTML='';slips.forEach(s=>{const i=document.createElement('img');i.className='thumb';i.src=s.dataURL;b.appendChild(i);});$('count').textContent=slips.length;updateRun();}
-function updateRun(){$('run').disabled=!(slips.length&&refRows.length);}
+function updateRun(){$('run').disabled=!(slips.length&&$('company').value&&refRows.some(r=>r.company_id===$('company').value));}
 $('run').onclick=async()=>{refRows.forEach(r=>r.matched=false);$('run').disabled=true;$('err').classList.add('hidden');$('prog').classList.remove('hidden');$('fill').style.width='0%';
  const out=new Array(slips.length);let i=0,done=0;const N=slips.length;
  async function w(){const idx=i++;if(idx>=N)return;const s=slips[idx];
@@ -267,7 +272,7 @@ $('run').onclick=async()=>{refRows.forEach(r=>r.matched=false);$('run').disabled
  render();$('prog').classList.add('hidden');$('run').disabled=false;};
 function render(){let ok=0,w=0,m=0;const tb=$('rows');tb.innerHTML='';
  matched.forEach((x,i)=>{const st=x.m.status;if(st==='ok')ok++;else if(st==='warn')w++;else m++;const o=x.ocr||{};
-  let mc='—',by='';if(st==='ok'){mc=x.m.row.name+' <small class="mut">('+(LABEL[x.m.row.table]||'')+')</small>';by=x.m.by;}else if(st==='warn'){mc=x.m.cands.map(c=>c.name).join(' / ');}else mc='<small class="mut">'+(x.m.reason||'')+'</small>';
+  let mc='—',by='';if(st==='ok'){mc=x.m.row.company+' · '+x.m.row.name+' <small class="mut">('+(LABEL[x.m.row.table]||'')+')</small>';by=x.m.by;}else if(st==='warn'){mc=x.m.cands.map(c=>c.name).join(' / ');}else mc='<small class="mut">'+(x.m.reason||'')+'</small>';
   const badge=st==='ok'?'<span class="badge ok">แมตแล้ว</span>':st==='warn'?'<span class="badge warn">ต้องเช็ก</span>':'<span class="badge miss">ไม่เจอคู่</span>';
   const tr=document.createElement('tr');tr.className=st;
   tr.innerHTML='<td>'+(i+1)+'</td><td><img class="thumb" style="width:40px;height:40px" src="'+x.slip.dataURL+'"></td><td class="amt">'+(o.amount!=null&&!isNaN(o.amount)?fmt(o.amount):'?')+(nCur(o.currency)==='USD'?' <small class="mut">USD</small>':'')+'</td><td>'+(o.recipient_name||'—')+(o.recipient_acct?'<div><small class="mut">…'+l4(o.recipient_acct)+'</small></div>':'')+'</td><td>'+mc+'</td><td><small class="mut">'+by+'</small></td><td>'+badge+'</td>';
@@ -275,7 +280,7 @@ function render(){let ok=0,w=0,m=0;const tb=$('rows');tb.innerHTML='';
  $('cOk').textContent=ok;$('cWarn').textContent=w;$('cMiss').textContent=m;$('results').classList.remove('hidden');
  $('commit').disabled=ok===0;$('commit').textContent='ยืนยัน & เขียนกลับ Bitable ('+ok+' รายการ)';}
 $('commit').onclick=async()=>{$('commit').disabled=true;$('commit').textContent='กำลังเขียนกลับ…';
- const pairs=matched.filter(x=>x.m.status==='ok').map(x=>({record_id:x.m.row.record_id,table:x.m.row.table,image:x.slip.base64,mime:x.slip.mime,filename:x.slip.name}));
+ const pairs=matched.filter(x=>x.m.status==='ok').map(x=>({company_id:x.m.row.company_id,record_id:x.m.row.record_id,table:x.m.row.table,image:x.slip.base64,mime:x.slip.mime,filename:x.slip.name}));
  const j=await api('match-commit',{table:$('table').value,pairs});
  if(!j.ok){$('commitOut').innerHTML='<span class="err">'+(j.error||'เขียนไม่สำเร็จ')+'</span>';$('commit').disabled=false;return;}
  const okN=j.results.filter(x=>x.ok).length,fail=j.results.length-okN;

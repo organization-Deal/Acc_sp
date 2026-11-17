@@ -292,7 +292,7 @@ export class SessionDO extends DurableObject {
       await this.#save(s);
       if (s.cardmsg) await patchMessage(this.env, s.cardmsg, buildCard(openId, s.state, opts));
       else { const mId = await sendInteractive(this.env, openId, buildCard(openId, s.state, opts)); if (mId) { s.cardmsg = mId; await this.#save(s); } }
-      await reply(this.env, openId, `📝 บันทึกเหตุผลแล้ว: "${t.trim()}"\nพิมพ์ \`y\` ยืนยัน หรือถ่ายบิลเพิ่มได้เลย`);
+      await reply(this.env, openId, `📝 บันทึกเหตุผลแล้ว: "${t.trim()}"\nกดตรวจรายละเอียดและเลือกบริษัทบนการ์ดเพื่อยืนยัน หรือถ่ายบิลเพิ่มได้เลย`);
       return;
     }
 
@@ -302,7 +302,7 @@ export class SessionDO extends DurableObject {
 
     if (s.state.bills.length || s.state.pool.length) {
       const bills = s.state.bills;
-      if (RX_CONFIRM.test(t)) { const r = await this.#prepareConfirm(s); if (r.ok) await this.flush(); else await reply(this.env, openId, r.error); return; }
+      if (RX_CONFIRM.test(t)) { const opts=this.#opts(s); await this.#save(s); await reply(this.env, openId, 'กรุณาตรวจรายละเอียดและเลือกบริษัทก่อน แล้วกดยืนยันบันทึกในหน้านี้: '+opts.workerUrl+'?act=sort&u='+encodeURIComponent(openId)+'&k='+encodeURIComponent(opts.tok)); return; }
       if (RX_DISCARD.test(t)) {
         if (s.cardmsg) await patchSimple(this.env, s.cardmsg, 'grey', '🗑️ ทิ้งบิลแล้ว');
         await this.ctx.storage.delete('session');
@@ -444,10 +444,7 @@ export class SessionDO extends DurableObject {
     if (!this.#checkTok(s, k)) return { page: htmlPage('⚠️ ลิงก์ใช้ไม่ได้', 'บิลนี้จัดการไปแล้ว หรือลิงก์หมดอายุ\nถ่ายบิลใหม่ส่งในแชทได้เลย') };
 
     if (act === 'confirm') {
-      const r = await this.#prepareConfirm(s);
-      if (!r.ok) return { page: htmlPage('ยังไม่มีรายการ', 'ถ่ายบิลใหม่ส่งในแชทได้เลย') };
-      return { needsFlush: true, page: htmlPage('⏳ กำลังบันทึก...',
-        `กำลังบันทึก ${r.count} รายการเข้าระบบ (~${Math.ceil(r.count * 1.5)} วิ)\nเสร็จแล้วจะมีข้อความแจ้งในแชท`) };
+      return { page: sortPageHtml(openId, k, this.env.WORKER_URL, s.state) };
     }
     if (act === 'discard') {
       if (s.cardmsg) await patchSimple(this.env, s.cardmsg, 'grey', '🗑️ ทิ้งบิลแล้ว');
@@ -570,9 +567,7 @@ export class SessionDO extends DurableObject {
       return { toast: { toast: { type: 'success', content: 'ทิ้งบิลแล้ว' } } };
     }
     if (value.action === 'confirm') {
-      const r = await this.#prepareConfirm(s);
-      if (!r.ok) return { toast: { toast: { type: 'success', content: 'ยังไม่มีรายการ' } } };
-      return { toast: { toast: { type: 'success', content: '⏳ กำลังบันทึก...' } }, flush: true };
+      return { toast: { toast: { type: 'info', content: 'กรุณาเปิดตรวจรายละเอียดและเลือกบริษัท แล้วกดยืนยันบันทึกในหน้าเว็บ' } } };
     }
     return { toast: { ok: true } };
   }

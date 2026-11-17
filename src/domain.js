@@ -241,12 +241,11 @@ export function buildCard(openId, state, opts) {
   }
 
   el.push({ tag: 'action', actions: [
-    { tag: 'button', text: { tag: 'plain_text', content: bills.length > 1 ? '✅ ยืนยันทั้งหมด' : '✅ ยืนยัน' }, type: 'primary', url: url('confirm') },
-    { tag: 'button', text: { tag: 'plain_text', content: '🧩 จัดบิล/แก้ไข' }, url: url('sort') },
+    { tag: 'button', text: { tag: 'plain_text', content: '📝 ตรวจรายละเอียดและเลือกบริษัท' }, type: 'primary', url: url('sort') },
     { tag: 'button', text: { tag: 'plain_text', content: '🗑️ ทิ้งทั้งหมด' }, type: 'danger', url: url('discard') } ] });
 
   el.push({ tag: 'note', elements: [{ tag: 'lark_md', content:
-    'บิลไหนยอดผิดพิมพ์ `บิล 1 ยอด 350` แก้เร็วๆ ได้ · หรือกด 🧩 จัดบิล/แก้ไข ดูรูปทั้งหมดแบบละเอียด' }] });
+    'กดตรวจรายละเอียดและเลือกบริษัท ตรวจยอด หมวด และรูปของแต่ละบิล แล้วกดยืนยันบันทึกในหน้านั้น' }] });
 
   return { config: { wide_screen_mode: true },
     header: { template: 'blue', title: { tag: 'plain_text', content: `📋 ตรวจก่อนยืนยัน (${bills.length} รายการ)` } },

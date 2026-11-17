@@ -213,8 +213,14 @@ async function handleMessage(event, env) {
 // storage 'session' = { openId, state:{itemsById,bills,pool}, cardmsg, tok, tosave }
 // ════════════════════════════════════════════════════════════════
 export class SessionDO extends DurableObject {
-  async financePoll() { return this.ctx.blockConcurrencyWhile(()=>financeTick(this)); }
-  async financeDecide(body) { return this.ctx.blockConcurrencyWhile(()=>financeCallback(this,body)); }
+  async financePoll() {
+    const run=(this.financeSerial||Promise.resolve()).then(()=>financeTick(this));
+    this.financeSerial=run.catch(()=>{});return run;
+  }
+  async financeDecide(body) {
+    const run=(this.financeSerial||Promise.resolve()).then(()=>financeCallback(this,body));
+    this.financeSerial=run.catch(()=>{});return run;
+  }
 
   async #load()  {
     const s = (await this.ctx.storage.get('session')) || {};

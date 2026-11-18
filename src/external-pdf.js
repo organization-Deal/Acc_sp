@@ -2,7 +2,7 @@ import {PDFDocument,PDFName,PDFHexString,PDFOperator,rgb,beginText,endText,setFo
 import fontkit from '@pdf-lib/fontkit';
 import {SARABUN_BASE64} from './sarabun-font.js';
 
-export const EXTERNAL_PDF_TEMPLATE_VERSION=2;
+export const EXTERNAL_PDF_TEMPLATE_VERSION=3;
 
 const bytes=Uint8Array.from(atob(SARABUN_BASE64),c=>c.charCodeAt(0));
 const face=fontkit.create(bytes);
@@ -10,6 +10,7 @@ const navy=[.10,.16,.25],teal=[.02,.40,.42],grey=[.36,.42,.48];
 const clean=v=>String(v??'').replace(/[\u0000-\u0008\u000B-\u001F]/g,'').normalize('NFC');
 const date=v=>v?new Date(v).toLocaleString('th-TH',{timeZone:'Asia/Bangkok',dateStyle:'medium',timeStyle:'short'}):'-';
 export async function renderExternalPdf(m){
+ if(m.stage!=='request'&&(!m.signing?.name||!m.signing?.signature||!m.signing?.stamp||m.signing.at!==m.may?.at))throw Error('ไม่มีข้อมูลลงนามที่ตรงกับการอนุมัติ');
  const doc=await PDFDocument.create();doc.registerFontkit(fontkit);
  const font=await doc.embedFont(bytes,{subset:false});doc.setTitle(m.title+' '+m.number);doc.setAuthor(m.company.name);doc.setCreationDate(new Date(m.generatedAt));doc.setModificationDate(new Date(m.generatedAt));
  let page,y,key;const pages=[];const left=42,width=511;
@@ -45,6 +46,19 @@ export async function renderExternalPdf(m){
  text(m.evidence.length?m.evidence.map((v,i)=>(i+1)+'. '+v).join('\n'):'เอกสารประกอบอ้างอิงตามลิงก์รายการต้นทาง',{size:9,gap:14});
  if(m.peak)link('เปิดเอกสาร PEAK เดิม',m.peak);link('เปิดรายการต้นทางและหลักฐานแนบทั้งหมด',m.sourceUrl);
  if(m.stage==='paid'){section('04  หลักฐานการโอน');text('แนบและตรวจหลักฐานเมื่อ '+date(m.paid.at),{size:9,gap:16});text('เลขอ้างอิงธนาคาร: '+m.paid.ref,{size:9,gap:16});text('ผู้บันทึก: '+m.paid.name,{size:9,gap:16});text('สลิปการโอนผูกอยู่ในรายการต้นทาง',{size:9,gap:16});}
+ // Formal signing area. The request copy remains unsigned; only verified approval copies carry images.
+ room(185);const top=y-10,half=(width-22)/2,centres=[left+half/2,left+half+22+half/2];
+ const centre=(s,c,at,size=9,color=navy)=>line(s,c-measure(s,size)/2,at,size,color);
+ for(const c of centres)page.drawLine({start:{x:c-92,y:top-38},end:{x:c+92,y:top-38},thickness:.5,color:rgb(...grey)});
+ centre(m.requester,centres[0],top-54);centre('ผู้จัดทำคำขอ',centres[0],top-69);centre('วันที่ '+date(m.requestedAt),centres[0],top-84,8,grey);
+ centre(m.stage==='request'?'(................................................)':m.signing.name,centres[1],top-54);
+ centre('ผู้อนุมัติ',centres[1],top-69);centre(m.stage==='request'?'วันที่ ........................................':'วันที่ '+date(m.signing.at),centres[1],top-84,8,grey);
+ if(m.stage!=='request'){
+  const sig=await doc.embedPng(m.signing.signature),seal=await doc.embedPng(m.signing.stamp),ss=sig.scaleToFit(116,42),zs=seal.scaleToFit(80,66);
+  page.drawImage(sig,{x:centres[1]-ss.width/2,y:top-36,width:ss.width,height:ss.height});
+  page.drawImage(seal,{x:centres[1]-zs.width/2,y:top-156,width:zs.width,height:zs.height});
+ }else page.drawRectangle({x:centres[1]-42,y:top-156,width:84,height:62,borderWidth:.4,borderColor:rgb(.8,.83,.85)});
+ centre('ตราประทับบริษัท',centres[1],top-169,8,grey);y=top-180;
  for(let i=0;i<pages.length;i++){page=pages[i];key=page.node.newFontDictionary(font.name,font.ref);line('เอกสารขออนุมัติภายใน - ไม่ใช่ใบเสร็จรับเงินหรือใบกำกับภาษี',left,38,8,grey);line(m.number+' | '+(i+1)+'/'+pages.length,left,24,7,grey);}
  return doc.save();
 }

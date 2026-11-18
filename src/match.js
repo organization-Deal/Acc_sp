@@ -137,11 +137,13 @@ export async function matchApi(act, request, env){
   if(!allowedAcct(env, v.open_id)) return J({ok:false,error:'ไม่มีสิทธิ์ (เฉพาะฝ่ายบัญชี)'});
 
   if(act==='match-rows'){
+    if(['partner','dealpay'].includes(body.table))return J({ok:false,error:'คู่ค้าและ DEALPAY ใช้ปุ่มแนบสลิปจากการ์ดรอนอตโอน หลังผ่านบัญชี นอต และเมย์แล้ว'});
     // ดึงทุกตาราง (auto) หรือเฉพาะตารางเดียวถ้าระบุ
     const keys = (body.table && body.table!=='all' && TABLES[body.table]) ? [body.table] : Object.keys(TABLES);
     try{
       let rows=[];
       for(const key of keys){
+        if(key==='partner'||key==='dealpay')continue;
         const T=TABLES[key];
         const recs=await listOpenRecords(env,T);
         rows=rows.concat(recs.map(r=>rowFromRecord(r,T,key)).filter(r=>r.name && !isNaN(r.amount)));
@@ -154,6 +156,7 @@ export async function matchApi(act, request, env){
     const results=[];
     for(const pr of (body.pairs||[])){
       try{
+        if(pr.table==='partner'||pr.table==='dealpay')throw new Error('คู่ค้าและ DEALPAY ต้องแนบสลิปจากการ์ดรอนอตโอน เพื่อยืนยันผลอนุมัติและบัญชีผู้รับ');
         const T=TABLES[pr.table]; if(!T) throw new Error('ตารางของรายการไม่ถูกต้อง');
         if(!companyOf(pr.company_id))throw new Error('ต้องเลือกบริษัทก่อนแมตสลิป');
         const current=(await listOpenRecords(env,T)).find(r=>r.record_id===pr.record_id);
@@ -175,7 +178,7 @@ export function matchCard(link){
   return { config:{wide_screen_mode:true},
     header:{template:'red',title:{tag:'plain_text',content:'แมตยอด · ฝ่ายบัญชี'}},
     elements:[
-      {tag:'div',text:{tag:'lark_md',content:'กดเปิดหน้าแมต → เลือกตาราง → โยนสลิป → ระบบจับคู่ + เขียนกลับให้อัตโนมัติ'}},
+      {tag:'div',text:{tag:'lark_md',content:'เบิกภายใน: เปิดหน้าแมตแล้วแนบสลิป\nคู่ค้า / DEALPAY: ใช้ปุ่มแนบสลิปจากการ์ดรอนอตโอน หลังเมย์อนุมัติ'}},
       {tag:'action',actions:[{tag:'button',text:{tag:'plain_text',content:'เปิดหน้าแมตยอด'},type:'primary',url:link}]}
     ]};
 }

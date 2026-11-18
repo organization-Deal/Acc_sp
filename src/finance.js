@@ -75,9 +75,11 @@ const button=(label,value,url)=>({tag:'button',text:plain(label),...(url?{url}:{
 const card=(title,elements,template='blue')=>({config:{wide_screen_mode:true},header:{template,title:plain(title)},elements});
 function rowText(x){const f=x.r.fields;return '**'+md(f['เลขใบขอเบิก'])+' • '+md(x.j.company.name)+'**\n'+md(f['ชื่อพนักงาน'])+' • '+x.j.items.length+' บิล • **'+money(f['ยอดรวม'])+' '+md(x.j.currency)+'**\n[ดู PDF]('+linkOf(f['ใบขอเบิก PDF'])+') | [เปิดรายการ]('+SUMMARY_URL+'&record='+x.r.record_id+')';}
 function reviewCard(stage,rows,nonce){
+ const pending=rows.filter(x=>!x.reviewStatus);
  const elements=[paragraph('ตรวจเอกสารก่อนกด • ปุ่มใช้ได้เฉพาะ'+(stage==='accounting'?'ฝ่ายบัญชี':stage==='not'?'นอต':'เมย์')+'\n'+rows.length+' ใบสรุป แยกบริษัท • ไม่ใช่การยืนยันโอนเงิน')];
- for(const x of rows){elements.push(paragraph(rowText(x)),{tag:'action',actions:[button(stage==='accounting'?'บัญชีตรวจผ่าน → ส่งให้นอต':stage==='not'?'ตรวจผ่าน → ส่งให้เมย์':'Approve',{finance:true,nonce,action:'accept',id:x.r.record_id}),button('ส่งกลับแก้ไข',{finance:true,nonce,action:'return',id:x.r.record_id})]});}
- elements.push({tag:'action',actions:[{...button(stage==='accounting'?'บัญชีตรวจผ่านทั้งหมด → ส่งให้นอต':stage==='not'?'ตรวจผ่านทั้งหมดในชุดนี้':'Approve ทั้งหมดในชุดนี้',{finance:true,nonce,action:'accept-all'}),type:'primary',confirm:{title:plain('ยืนยัน '+rows.length+' ใบสรุป'),text:plain('ตรวจเอกสารและยอดครบทุกบริษัทแล้วใช่ไหม')}}]});
+ elements.push(paragraph('เหลือให้กด '+pending.length+' / '+rows.length+' ใบ'));
+ for(const x of rows){elements.push(paragraph(x.j?rowText(x):md(x.r.record_id)));if(x.reviewStatus){elements.push(paragraph(x.reviewStatus));continue;}elements.push({tag:'action',actions:[button(stage==='accounting'?'บัญชีตรวจผ่าน → ส่งให้นอต':stage==='not'?'ตรวจผ่าน → ส่งให้เมย์':'Approve',{finance:true,nonce,action:'accept',id:x.r.record_id}),button('ส่งกลับแก้ไข',{finance:true,nonce,action:'return',id:x.r.record_id})]});}
+ if(pending.length)elements.push({tag:'action',actions:[{...button(stage==='not'?'ตรวจผ่านที่เหลือ '+pending.length+' ใบ':'Approve ที่เหลือ '+pending.length+' ใบ',{finance:true,nonce,action:'accept-all'}),type:'primary',confirm:{title:plain('ยืนยัน '+pending.length+' ใบสรุป'),text:plain('ตรวจเอกสารและยอดครบทุกบริษัทแล้วใช่ไหม')}}]});
  return card(stage==='accounting'?'รอบัญชีตรวจเอกสาร • ผู้ช่วยบัญชี':stage==='not'?'รอนอตตรวจ • ผู้ช่วยบัญชี':'รอเมย์อนุมัติ • ผู้ช่วยบัญชี',elements,stage==='not'?'blue':'purple');
 }
 function transferCard(rows,test,portal){
@@ -92,6 +94,31 @@ function transferCard(rows,test,portal){
 }
 async function send(env,to,c,uuid){const d=await api(env,'im/v1/messages?receive_id_type=open_id','POST',{receive_id:to,msg_type:'interactive',content:JSON.stringify(c),uuid:uuid.slice(0,50)});if(!d.message_id)throw Error('No message_id');return d.message_id;}
 async function patch(env,id,c){return api(env,'im/v1/messages/'+encodeURIComponent(id),'PATCH',{content:JSON.stringify(c)});}
+// Keep a review card's membership stable while its remaining documents are reviewed.
+export async function reviewRows(saved,all,storage){
+ const out=[];
+ for(const [id,expected,,,accountingAt,notAt] of saved.signatures){
+  const source=all.find(x=>x.r.record_id===id),x=source?{...source}:{r:{record_id:id,fields:{}},j:null};
+  const f=x.r.fields,done=await storage.get('decision:'+saved.nonce+':'+id);
+  const same=x.j&&await fingerprint(x.r,x.j)===expected;
+  const stage=x.j?await checkedStage(x.r,x.j):'missing';
+  const epoch=(accountingAt===undefined||accountingAt===(f['เวลาบัญชีตรวจผ่าน']||0))&&(notAt===undefined||saved.stage==='not'||notAt===(f['เวลานอตตรวจผ่าน']||0));
+  if(saved.retired||Date.now()-saved.created>7*86400000)x.reviewStatus='⚠️ การ์ดนี้สิ้นสุดแล้ว ใช้การ์ดล่าสุด';
+  else if(!same)x.reviewStatus='⚠️ ข้อมูลเปลี่ยน ต้องตรวจเอกสารฉบับล่าสุด';
+  else if(stage==='returned')x.reviewStatus='↩️ ส่งกลับแก้ไขแล้ว';
+  else if(f.Approve===true)x.reviewStatus='✅ เมย์อนุมัติแล้ว • '+(f['PDF อนุมัติแล้ว']?'ดูสถานะโอนในรายการ':md(f['สถานะระบบแยกบริษัท']||'รอสร้าง PDF อนุมัติ'));
+  else if(saved.stage==='not'&&f['นอตตรวจผ่าน']===true)x.reviewStatus='✅ นอตตรวจผ่านแล้ว → รอเมย์อนุมัติ';
+  else if(done)x.reviewStatus=done.action==='return'?'↩️ ส่งกลับแก้ไขแล้ว':'✅ ทำรายการแล้ว • ตรวจสถานะล่าสุดในตาราง';
+  else if(stage!==saved.stage||!epoch)x.reviewStatus='⚠️ สถานะเปลี่ยน ใช้การ์ดล่าสุด';
+  out.push(x);
+ }
+ return out;
+}
+async function refreshReview(owner,key,saved,all){
+ const rows=await reviewRows(saved,all,owner.ctx.storage),c=reviewCard(saved.stage,rows,saved.nonce),hash=await digest(c);
+ if(saved.message&&saved.renderHash!==hash){await patch(owner.env,saved.message,c);saved.renderHash=hash;await owner.ctx.storage.put(key,saved);}
+ return rows.filter(x=>!x.reviewStatus);
+}
 export const TABLE_REQUEST='ส่งให้นอต (คำสั่งจากตาราง)';
 export function tableReviewProblem(r,j){
  const f=r.fields||{};
@@ -123,6 +150,24 @@ export async function financeTick(owner){
  if(env.FINANCE_TEST_ONLY==='true'){groups.accounting=[];groups.not=[];groups.may=[];groups.transfer=[];}
  let sends=0;
  for(const stage of Object.keys(groups)){
+  if(['not','may'].includes(stage)){
+   const active=[],covered=new Set();
+   for(const key of await ctx.storage.get('active:'+stage)||[]){
+    const saved=await ctx.storage.get(key);if(!saved?.sent)continue;
+    const pending=await refreshReview(owner,key,saved,all);
+    if(pending.length&&saved.recipient===recipients[stage]){active.push(key);pending.forEach(x=>covered.add(x.r.record_id));}
+   }
+   const remaining=groups[stage].filter(x=>!covered.has(x.r.record_id)).sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));
+   for(let i=0;i<remaining.length&&sends<4;i+=5){
+    const chunk=remaining.slice(i,i+5),signatures=await Promise.all(chunk.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),linkOf(x.r.fields['PDF อนุมัติแล้ว']),x.r.fields['หลักฐานการโอน']||[],x.r.fields['เวลาบัญชีตรวจผ่าน']||0,x.r.fields['เวลานอตตรวจผ่าน']||0]));
+    const key='card:v3:'+stage+':'+await digest([signatures,recipients[stage]]);
+    let saved=await ctx.storage.get(key);
+    if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:recipients[stage]};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
+    if(!saved.sent){const c=reviewCard(stage,chunk,saved.nonce);saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;saved.renderHash=await digest(c);await ctx.storage.put(key,saved);sends++;}
+    active.push(key);
+   }
+   await ctx.storage.put('active:'+stage,active);continue;
+  }
   const rows=groups[stage].sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));const size=['accounting','not','may'].includes(stage)?5:15;
   const active=[];
   for(let i=0;i<rows.length;i+=size){const chunk=rows.slice(i,i+size);const signatures=await Promise.all(chunk.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),linkOf(x.r.fields['PDF อนุมัติแล้ว']),x.r.fields['หลักฐานการโอน']||[],...(['accounting','not','may'].includes(stage)?[x.r.fields['เวลาบัญชีตรวจผ่าน']||0,x.r.fields['เวลานอตตรวจผ่าน']||0]:[])]));
@@ -166,10 +211,13 @@ export async function financeCallback(owner,b){
     saved.stage==='accounting'?{'บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':actor,'เวลาบัญชีตรวจผ่าน':Date.now(),'ข้อมูลที่บัญชีตรวจผ่าน':expected,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','ผู้ตรวจสอบก่อนอนุมัติ':'','เวลานอตตรวจผ่าน':null}:
     saved.stage==='not'?{'นอตตรวจผ่าน':true,'ผู้ตรวจสอบก่อนอนุมัติ':'นอต (NOT)','เวลานอตตรวจผ่าน':Date.now(),'ข้อมูลที่นอตตรวจผ่าน':expected}:{Approve:true};
    await api(env,recordsPath(SUMMARY)+'/'+id,'PUT',{fields});
+   Object.assign(x.r.fields,fields);
    await ctx.storage.put(doneKey,{at:Date.now(),actor,action:v.action,fingerprint:expected});results.push(textOf(f['เลขใบขอเบิก'])+' '+(v.action==='return'?'ส่งกลับแล้ว':saved.stage==='accounting'?'บัญชีตรวจผ่านแล้ว รอส่งให้นอต':saved.stage==='not'?'ตรวจผ่านแล้ว':'อนุมัติแล้ว รอสร้าง PDF'));
   }catch(e){results.push(id+' — '+e.message);}
  }
- // Preserve buttons for unselected documents; poll replaces cards after state changes.
+ // Update this exact card after persisting the decision, including partial success.
+ try{await refreshReview(owner,key,saved,all);}catch(e){console.log('FINANCE_CARD_PATCH_RETRY',saved.message,e.message);}
  await send(env,actor,card('ผลการดำเนินการ',[paragraph(results.map(md).join('\n'))]),await digest([saved.nonce,v.action,targets.map(x=>x[0])]));
  return {ok:true};
 }
+

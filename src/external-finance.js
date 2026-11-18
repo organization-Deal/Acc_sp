@@ -1,11 +1,11 @@
 import {ED,documentReady,documentCurrent,ensureExternalDocument,readExternalDocument} from './external-documents.js';
 // Partner payments and per-customer refunds. This module never transfers money or creates PEAK documents.
-import {api,recordsPath,people,textOf,digest,verifiedCallback} from './finance.js';
+import {api,recordsPath,people,textOf,digest,verifiedCallback,fingerprint} from './finance.js';
 import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
-import {transferPage} from './transfer.js';
+import {transferPage,portalAuth,portalAction,internalTransferRows} from './transfer.js';
 
 export const EXTERNAL_FLOW_VERSION='external-flow-v2-documents';
 export const EF={request:'บัญชีเช็กแล้ว → ส่งให้นอต',status:'สถานะงาน',not:'นอตตรวจผ่าน',may:'เมย์อนุมัติ',delivery:'หลักฐานส่งให้นอต',audit:'ข้อมูล Flow (ระบบ)'};
@@ -104,25 +104,29 @@ async function eRender(saved,all){
  return {card:eCard(saved.stage==='not'?'คู่ค้า / DEALPAY • รอนอตตรวจ':'คู่ค้า / DEALPAY • รอเมย์อนุมัติ',elements,saved.stage==='not'?'blue':'purple'),pending};
 }
 const eTransferUrl=(saved,env)=>(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-transfers&k='+encodeURIComponent(saved.nonce);
+const transferLabel=kind=>kind==='internal'?'เบิกภายใน':EXTERNAL_TABLES[kind].label;
+const transferTotals=rows=>[...new Set(rows.map(x=>x.currency))].map(currency=>eMoney(rows.filter(x=>x.currency===currency).reduce((s,x)=>s+Math.round(x.amount*100),0)/100)+' '+currency).join(' + ')||'0.00 THB';
 export function externalTransferCard(saved,rows,env){
- const total=rows.reduce((s,x)=>s+Math.round(x.amount*100),0)/100,groups=new Map();
+ const groups=new Map();
  for(const x of rows){if(!groups.has(x.company.id))groups.set(x.company.id,[]);groups.get(x.company.id).push(x);}
- const elements=[ePara('**รอโอน '+rows.length+' รายการ • รวม '+eMoney(total)+' THB**\nคู่ค้า '+rows.filter(x=>x.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(x=>x.kind==='dealpay').length+' รายการ'),ePara(rows.length?'เมย์อนุมัติแล้ว • ตรวจบริษัทผู้จ่ายก่อนโอน\nหลังโอนแนบสลิปเพื่อปิดรายการ • การ์ดนี้อัปเดตรายการคงเหลืออัตโนมัติ':'ไม่มีรายการที่อนุมัติแล้วรอโอนในขณะนี้')];
- for(const group of groups.values())elements.push(ePara('**'+eMd(group[0].company.name)+'**\n'+group.length+' รายการ • '+eMoney(group.reduce((s,x)=>s+Math.round(x.amount*100),0)/100)+' THB'));
+ const elements=[ePara('**รอโอน '+rows.length+' รายการ • รวม '+transferTotals(rows)+'**\n'+(saved.unified?'เบิกภายใน '+rows.filter(x=>x.kind==='internal').length+' รายการ • ':'')+'คู่ค้า '+rows.filter(x=>x.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(x=>x.kind==='dealpay').length+' รายการ'),ePara(rows.length?'เมย์อนุมัติแล้ว • ตรวจบริษัทผู้จ่ายก่อนโอน\nแนบสลิปสำเร็จแล้ว ระบบติ๊กรายการสำเร็จอัตโนมัติ':'ไม่มีรายการที่อนุมัติแล้วรอโอนในขณะนี้')];
+ for(const group of groups.values())elements.push(ePara('**'+eMd(group[0].company.name)+'**\n'+group.length+' รายการ • '+transferTotals(group)));
  let shown=0;
  for(const group of groups.values())for(const x of group){
-  const item=ePara('**'+(shown+1)+'. '+eMd(x.name)+' • '+eMoney(x.amount)+' THB**\n'+x.company.id+' • '+eMd(EXTERNAL_TABLES[x.kind].label)+' • '+eMd(textOf(x.r.fields[ED.number])||x.doc)+'\n'+eMd(x.bank)+' • '+eMd(x.account)+'\n[PDF อนุมัติแล้ว]('+eDocumentUrl(x,saved.nonce,'approved',env)+') | [เปิดรายการ / หลักฐาน]('+eUrl(x)+')'+(x.r.fields['หลักฐานการโอน']?.length?'\n⚠️ มีหลักฐานโอนแล้ว ตรวจสอบก่อนโอนซ้ำ':''));
+  const item=ePara('**'+(shown+1)+'. '+eMd(x.name)+' • '+eMoney(x.amount)+' '+x.currency+'**\n'+x.company.id+' • '+eMd(transferLabel(x.kind))+' • '+eMd(textOf(x.r.fields[ED.number])||x.doc)+'\n'+eMd(x.bank)+' • '+eMd(x.account)+'\n[PDF อนุมัติแล้ว]('+(x.pdf||eDocumentUrl(x,saved.nonce,'approved',env))+') | [เปิดรายการ / หลักฐาน]('+eUrl(x)+')'+(x.r.fields['หลักฐานการโอน']?.length?'\n⚠️ มีหลักฐานโอนแล้ว ตรวจสอบก่อนโอนซ้ำ':''));
   // Keep one card even for a large queue; the portal always contains every current row.
-  if(shown>=20||new TextEncoder().encode(JSON.stringify([...elements,item])).length>23000)continue;
+  if(shown>=30||new TextEncoder().encode(JSON.stringify([...elements,item])).length>23000)continue;
   elements.push(item);shown++;
  }
  if(shown<rows.length)elements.push(ePara('แสดง '+shown+' จาก '+rows.length+' รายการ • เปิดรายการรอโอนทั้งหมดด้านล่าง'));
  elements.push({tag:'action',actions:[{...eButton('เปิดรายการรอโอนทั้งหมด / แนบสลิป',null,eTransferUrl(saved,env)),type:'primary'}]});
- return eCard('คู่ค้า / DEALPAY • รอนอตโอน',elements,rows.length?'green':'grey');
+ return eCard(saved.unified?'รายการรอโอนทั้งหมด • นอต':'คู่ค้า / DEALPAY • รอนอตโอน',elements,rows.length?'green':'grey');
 }
-async function eTransferSummary(owner,all,recipient){
+async function eTransferSummary(owner,all,recipient,unified=false){
  const store=owner.ctx.storage,rows=[];
  for(const x of all)if(await externalStage(x)==='transfer')rows.push(x);
+ const externalCount=rows.length;
+ if(unified)for(const x of await internalTransferRows(owner))rows.push({...x,company:x.source.j.company,r:x.source.r,table:'tblgakFKBOvz9aCW'});
  rows.sort((a,b)=>a.company.id.localeCompare(b.company.id)||a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
  const pointer=await store.get('external:transfer-summary'),keys=[...new Set([pointer,...await store.get('external:active:transfer')||[]].filter(Boolean))],existing=[];
  for(const key of keys){const saved=await store.get(key);if(saved)existing.push({key,saved});}
@@ -130,7 +134,7 @@ async function eTransferSummary(owner,all,recipient){
  let current=valid.find(x=>x.key===pointer)||valid.sort((a,b)=>b.saved.created-a.saved.created)[0],sends=0;
  if(!current&&rows.length){const nonce=crypto.randomUUID();current={key:'external:card:transfer:summary:'+nonce,saved:{version:1,stage:'transfer',recipient,nonce,created:Date.now()}};}
  if(current){
-  const {key,saved}=current;saved.summary=true;saved.signatures=await Promise.all(rows.map(async x=>({id:x.id,fingerprint:await externalFingerprint(x),epoch:x.audit.epoch})));
+  const {key,saved}=current;saved.summary=true;saved.unified=unified;saved.signatures=await Promise.all(rows.map(async x=>({id:x.id,fingerprint:x.kind==='internal'?await fingerprint(x.r,x.source.j):await externalFingerprint(x),epoch:x.audit?.epoch})));
   // Persist the same nonce before delivery, so a retry cannot create another summary.
   await store.put(key,saved);await store.put('external:nonce:'+saved.nonce,key);await store.put('external:transfer-summary',key);
   const card=externalTransferCard(saved,rows,owner.env);
@@ -143,7 +147,15 @@ async function eTransferSummary(owner,all,recipient){
   saved.retired=true;await store.put(key,saved);
  }
  await store.put('external:active:transfer',current?[current.key]:[]);
- return {count:rows.length,sends,cards:current?1:0};
+ if(unified){
+  for(const key of await store.get('active:transfer')||[]){const saved=await store.get(key);if(!saved)continue;
+   if(saved.message)await ePatch(owner,key,saved,eCard('รวมรายการรอโอนแล้ว',[ePara('เบิกภายใน คู่ค้า และ DEALPAY อยู่ในการ์ดเดียวแล้ว'+(current&&saved.recipient===recipient?'\n[เปิดรายการรอโอนทั้งหมด]('+eTransferUrl(current.saved,owner.env)+')':''))],'grey'));
+   saved.retired=true;saved.mergedInto=current?.key;await store.put(key,saved);
+  }
+  await store.put('active:transfer',[]);
+  console.log('UNIFIED_TRANSFERS',JSON.stringify({count:rows.length,internal:rows.length-externalCount,external:externalCount,totals:transferTotals(rows),cards:current?1:0}));
+ }
+ return {count:externalCount,sends,cards:current?1:0};
 }
 async function eReceipt(owner,saved,all){
  if(!['not','may'].includes(saved.stage)||!saved.message||!saved.sentAt)return;
@@ -154,7 +166,7 @@ async function eReceipt(owner,saved,all){
   await eWrite(owner.env,x,{[EF.audit]:JSON.stringify(x.audit),...(saved.stage==='not'?{[EF.delivery]:'ส่งแล้ว • '+at}:{})});
  }
 }
-export async function externalTick(owner){
+export async function externalTick(owner,{unified=false}={}){
  if(owner.env.FINANCE_ENABLED!=='true')return {disabled:true};
  const all=await externalSnapshot(owner.env),recipients=await people(owner.env);
  let enabledAt=await owner.ctx.storage.get('external:documents-enabled-at');if(!enabledAt){enabledAt=Date.now();await owner.ctx.storage.put('external:documents-enabled-at',enabledAt);}
@@ -200,7 +212,7 @@ export async function externalTick(owner){
   }
   await owner.ctx.storage.put('external:active:'+stage,active);
  }
- const transfer=await eTransferSummary(owner,all,recipients.not);counts.transfer=transfer.count;sends+=transfer.sends;
+ const transfer=await eTransferSummary(owner,all,recipients.not,unified);counts.transfer=transfer.count;sends+=transfer.sends;
  const transferCards=transfer.cards;await owner.ctx.storage.put('external:lastPoll',{at:Date.now(),counts,sends,transferCards});console.log('EXTERNAL_FINANCE_POLL',JSON.stringify({counts,sends,transferCards}));return {ok:true,counts,sends,transferCards};
 }
 export async function externalCallback(owner,b){
@@ -230,8 +242,9 @@ export async function externalPortalAuth(owner,token){
 }
 const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+(textOf(x.r.fields[ED.number])||x.doc),company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,amount:x.amount,currency:x.currency,bills:1,pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
 export function externalSlipFits(o,x){const acc=eDigits(o.recipient_acct);return Number.isFinite(Number(o.amount))&&Math.round(Number(o.amount)*100)===Math.round(x.amount*100)&&String(o.currency||'').toUpperCase()===x.currency&&acc.length>=4&&x.account.endsWith(acc);}
-export async function externalPortalAction(owner,b){
- const saved=await externalPortalAuth(owner,b.token),{ctx,env}=owner;
+export async function externalPortalAction(owner,b,session){
+ const saved=session||await externalPortalAuth(owner,b.token),{ctx,env}=owner;
+ if(saved.stage!=='transfer')throw Error('รายการทดสอบไม่รับสลิปจริง');
  if(b.op==='rows'){const rows=[];for(const x of await externalSnapshot(env))if(await externalStage(x)==='transfer')rows.push(ePortalRow(x,saved,env));return {ok:true,test:false,rows};}
  if(b.op==='prepare'){
   if(!['image/jpeg','image/png','image/webp'].includes(b.mime)||typeof b.image!=='string'||b.image.length>9*1024*1024)throw Error('รูปไม่ถูกต้องหรือใหญ่เกิน 6 MB');
@@ -262,8 +275,52 @@ export async function externalPortalAction(owner,b){
 }
 export function externalTransferPage(token){return transferPage(token).replaceAll('/?act=transfer-api','/?act=external-transfer-api');}
 
-export async function externalDocumentAccess(owner,b){
- const key=await owner.ctx.storage.get('external:nonce:'+b.k),saved=key&&await owner.ctx.storage.get(key);
+// Both existing transfer links lead to the same queue. TEST sessions remain isolated.
+export async function unifiedPortalAuth(owner,token){
+ const store=owner.ctx.storage;
+ if(await store.get('external:nonce:'+token))return externalPortalAuth(owner,token);
+ const saved=await portalAuth(owner,token);
+ if(saved.retired&&saved.mergedInto){const current=await store.get(saved.mergedInto);if(!current||current.recipient!==saved.recipient)throw Error('ลิงก์หมดอายุ');return externalPortalAuth(owner,current.nonce);}
+ if(saved.retired)throw Error('ลิงก์หมดอายุ เปิดการ์ดล่าสุด');
+ return saved;
+}
+export async function unifiedPortalAction(owner,b){
+ const saved=await unifiedPortalAuth(owner,b.token);
+ if(saved.stage==='test')return portalAction(owner,b,saved);
+ if(b.op==='rows'){
+  const [internal,external]=await Promise.all([internalTransferRows(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);
+  const rows=[...internal.map(({source,...x})=>({...x,doc:'เบิกภายใน • '+x.doc})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];
+  rows.sort((a,b)=>a.company_id.localeCompare(b.company_id)||a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
+  return {ok:true,test:false,rows};
+ }
+ if(b.op==='prepare'){
+  const result=await portalAction(owner,b,saved);
+  await owner.ctx.storage.put('external:draft:'+result.draft.id,result.draft);
+  return result;
+ }
+ if(b.op==='commit'){
+  if(!Array.isArray(b.pairs)||b.pairs.length<1||b.pairs.length>50)throw Error('เลือก 1–50 รายการ');
+  if(new Set(b.pairs.map(p=>p.id)).size!==b.pairs.length)throw Error('เลือกรายการซ้ำ');
+  const results=[];
+  for(const p of b.pairs){
+   // Support slips prepared on either page before the two queues were combined.
+   const draft=await owner.ctx.storage.get('draft:'+p.draft)||await owner.ctx.storage.get('external:draft:'+p.draft);
+   if(draft&&draft.owner===saved.recipient&&Date.now()-draft.at<2*3600000){await owner.ctx.storage.put('draft:'+p.draft,draft);await owner.ctx.storage.put('external:draft:'+p.draft,draft);}
+   const action=/^(partner|dealpay):/.test(String(p.id))?externalPortalAction:portalAction;
+   const result=await action(owner,{...b,pairs:[p]},saved);results.push(...result.results);
+  }
+  return {ok:true,results};
+ }
+ throw Error('คำสั่งไม่ถูกต้อง');
+}
+export async function unifiedDocumentAccess(owner,b){
+ if(await owner.ctx.storage.get('external:nonce:'+b.k))return externalDocumentAccess(owner,b);
+ const saved=await unifiedPortalAuth(owner,b.k);if(saved.stage!=='transfer')throw Error('ไม่มีสิทธิ์');
+ return externalDocumentAccess(owner,b,saved);
+}
+
+export async function externalDocumentAccess(owner,b,session){
+ const key=await owner.ctx.storage.get('external:nonce:'+b.k),saved=session||(key&&await owner.ctx.storage.get(key));
  if(!saved||saved.retired||Date.now()-saved.created>7*86400000||!['not','may','transfer'].includes(saved.stage))throw Error('ลิงก์หมดอายุ');
  const recipients=await people(owner.env);if(saved.recipient!==recipients[saved.stage==='may'?'may':'not'])throw Error('ไม่มีสิทธิ์');
  const [kind,rid]=String(b.id||'').split(':');if(!EXTERNAL_TABLES[kind]||!/^rec[a-zA-Z0-9]+$/.test(rid))throw Error('รายการไม่ถูกต้อง');

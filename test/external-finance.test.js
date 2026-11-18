@@ -7,13 +7,18 @@ import {digest} from '../src/finance.js';
 import {externalDocumentAccess} from '../src/external-finance.js';
 import {CFG} from '../src/config.js';
 import {signMatchToken,matchApi} from '../src/match.js';
+import {createHash} from 'node:crypto';
+import {SIGNING_ASSET_KEY,prepareSigningProfile} from '../src/external-signing.js';
+import {EXTERNAL_PDF_TEMPLATE_VERSION,renderExternalPdf} from '../src/external-pdf.js';
+const pixel='iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLbtAAAAABJRU5ErkJggg==';
+const fakeAsset={mime:'image/png',base64:pixel,sha256:createHash('sha256').update(Buffer.from(pixel,'base64')).digest('hex')};
 const company='บริษัท ออมนิ แดช เพย์ วอลเล็ต จำกัด';
 async function externalTick(owner){let r;for(let i=0;i<4;i++)r=await poll(owner);return r;}
 function record(kind,i=0){return {record_id:'rec'+kind+i,fields:kind==='partner'?{'การเงินที่ทำเรื่องเบิก':[{id:'ou_requester',name:'Employee requester'}],'รายการเบิก':i+'PAY_','ชื่อบริษัท':company,'ชื่อบริษัทคู่ค้าผู้รับเงิน':'Vendor '+i,'ยอดโอนเงิน':188+i,'เลขบัญชีผู้รับเงิน':'12345678'+String(i).padStart(2,'0'),'ธนาคาร':'KBANK','สกุลเงิน':'Thai Baht (THB)','ชื่อรายการ':'ค่าเดินทาง','ลงบันทึกค่าใช้จ่ายใน PEAK':{link:'https://doc.peakaccount.com/expenses?emi=NDk1MTUw&eti=reference'},'เอกสารแนบ':[{file_token:'f'+i,url:'https://temporary/one'}]}:{'การเงินที่ทำเรื่องเบิก':[{id:'ou_requester',name:'Employee requester'}],'เหตุผลขอคืนเงิน':'ชำระเงินแล้วใช้ตู้ไม่ได้','Case Number':[{text:'DEAL'+i+'TH'}],'บริษัท':company,'ชื่อบัญชีผู้รับเงิน':'Customer '+i,'จำนวนเงิน':20,'เลขที่บัญชีธนาคาร':'87654321'+String(i).padStart(2,'0'),'ธนาคาร':'SCB','ประเภทตู้':'ตู้ชกมวย','ชื่อสถานที่ตั้งตู้':'Location '+i,'สลิปโอนเงินที่ใช้บริการกับตู้':[{file_token:'f'+i,url:'https://temporary/one'}]}};}
 function harness(){
  const rows={partner:[],dealpay:[]},db=new Map(),cards=new Map(),writes=[],files=new Map();let serial=0,failId='',failUpload=false;
- const owner={env:{FINANCE_ENABLED:'true',LARK_VERIFICATION_TOKEN:'verify',WORKER_URL:'https://example.test',KV:{get:async()=> 'token'}},ctx:{storage:{get:async k=>structuredClone(db.get(k)),put:async(k,v)=>db.set(k,structuredClone(v))}}};
- owner.documentContext={expires:Date.now()+600000,companies:new Map([['ODP',{name:company,taxId:'0000000000000',address:'Example address'}]]),names:new Map([['ou_not','Not'],['ou_may','May']])};
+ const owner={env:{FINANCE_ENABLED:'true',LARK_VERIFICATION_TOKEN:'verify',WORKER_URL:'https://example.test',KV:{get:async key=>key===SIGNING_ASSET_KEY?{version:1,assets:{signature:fakeAsset,stamp:fakeAsset}}:'token'}},ctx:{storage:{get:async k=>structuredClone(db.get(k)),put:async(k,v)=>db.set(k,structuredClone(v))}}};
+ owner.documentContext={expires:Date.now()+600000,companies:new Map([['ODP',{name:company,taxId:'0000000000000',address:'Example address'}]]),names:new Map([['ou_not','Not'],['ou_may','May']]),signing:new Map([['ODP',{approver:'May',signatureId:'signature',stampId:'stamp'}]])};
  const real=globalThis.fetch;
  globalThis.fetch=async(url,opt={})=>{
   const path=new URL(url).pathname,body=typeof opt.body==='string'?JSON.parse(opt.body):{};let data={};
@@ -120,12 +125,28 @@ test('PDF layout refresh preserves approvals, financial identity, and active rev
   await externalCallback(h.owner,h.callback(h.db.get(h.db.get('external:active:not')[0])));await externalTick(h.owner);
   const beforeAudit=r.fields[EF.audit],beforeHash=await externalFingerprint(externalRow('dealpay',r)),beforeCards=h.cards.size,number=r.fields[ED.number];
   const meta=documentMeta(externalRow('dealpay',r)),oldFile=meta.request.file;delete meta.request.templateVersion;r.fields[ED.meta]=JSON.stringify(meta);
-  const key=[...h.db.keys()].find(k=>k.startsWith('external:document:')&&k.endsWith(':pdf:2'));
-  const oldJob=h.db.get(key);h.db.delete(key);h.db.set(key.replace(/:pdf:2$/,''),oldJob);
+  const key=[...h.db.keys()].find(k=>k.startsWith('external:document:')&&k.endsWith(':pdf:'+EXTERNAL_PDF_TEMPLATE_VERSION));
+  const oldJob=h.db.get(key);h.db.delete(key);h.db.set(key.replace(/:pdf:\d+$/,''),oldJob);
   assert.equal(await externalStage(externalRow('dealpay',r)),'may');await poll(h.owner);
   assert.equal(r.fields[EF.audit],beforeAudit);assert.equal(await externalFingerprint(externalRow('dealpay',r)),beforeHash);
   assert.equal(h.cards.size,beforeCards);assert.equal(r.fields[ED.number],number);assert.equal(await externalStage(externalRow('dealpay',r)),'may');
-  const refreshed=documentMeta(externalRow('dealpay',r));assert.equal(refreshed.request.templateVersion,2);assert.notEqual(refreshed.request.file,oldFile);assert.equal(refreshed.request.revision,meta.request.revision+1);
+  const refreshed=documentMeta(externalRow('dealpay',r));assert.equal(refreshed.request.templateVersion,EXTERNAL_PDF_TEMPLATE_VERSION);assert.notEqual(refreshed.request.file,oldFile);assert.equal(refreshed.request.revision,meta.request.revision+1);
   assert.ok(r.fields[ED.history].some(a=>a.file_token===oldFile));await poll(h.owner);assert.equal(h.files.size,2);
+ }finally{h.restore();}
+});
+
+test('formal signatures require actual approval, matching company profile, and original private assets',async()=>{
+ const h=harness();try{
+  const r=record('dealpay');r.fields[EF.request]=true;h.rows.dealpay.push(r);await externalTick(h.owner);
+  assert.equal([...h.db.values()].find(v=>v?.model)?.model.signing,null);
+  let x=externalRow('dealpay',r);await assert.rejects(()=>prepareSigningProfile(h.owner,x,h.owner.documentContext),/อนุมัติจริง/);
+  await externalCallback(h.owner,h.callback(h.db.get(h.db.get('external:active:not')[0])));await externalTick(h.owner);
+  await externalCallback(h.owner,h.callback(h.db.get(h.db.get('external:active:may')[0])));x=externalRow('dealpay',r);
+  h.owner.documentContext.signing.get('ODP').approver='Someone else';await assert.rejects(()=>prepareSigningProfile(h.owner,x,h.owner.documentContext),/ทะเบียนบริษัท/);
+  h.owner.documentContext.signing.get('ODP').approver='May';const profile=await prepareSigningProfile(h.owner,x,h.owner.documentContext);assert.equal(profile.actor,'ou_may');assert.equal(profile.at,x.audit.may.at);assert.equal(profile.stampId,'stamp');
+  h.owner.signingAssetCache.value.assets.stamp={...fakeAsset,sha256:'bad'};await assert.rejects(()=>prepareSigningProfile(h.owner,x,h.owner.documentContext),/ไฟล์ลงนามเปลี่ยน/);h.owner.signingAssetCache.value.assets.stamp=fakeAsset;
+  await externalTick(h.owner);const job=[...h.db.values()].find(v=>v?.model?.stage==='approved');assert.equal(job.model.signing.name,'May');assert.equal(job.model.signing.signatureHash,fakeAsset.sha256);assert.equal(job.model.signing.signature,undefined);
+  const meta=documentMeta(externalRow('dealpay',r));assert.equal(meta.approved.signingVersion,1);assert.equal(meta.approved.approvedAt,x.audit.may.at);
+  await assert.rejects(()=>renderExternalPdf({...job.model,signing:null}),/ข้อมูลลงนาม/);
  }finally{h.restore();}
 });

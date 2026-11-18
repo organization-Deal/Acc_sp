@@ -287,7 +287,7 @@ export async function unifiedPortalAuth(owner,token){
 export async function unifiedPortalAction(owner,b){
  const saved=await unifiedPortalAuth(owner,b.token);
  if(saved.stage==='test')return portalAction(owner,b,saved);
- if(['resume','reread'].includes(b.op))return portalAction(owner,b,saved);
+ if(['resume','reread','reference'].includes(b.op))return portalAction(owner,b,saved);
  if(b.op==='rows'){
   const [internal,external]=await Promise.all([internalTransferRows(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);
   const rows=[...internal.map(({source,...x})=>({...x,doc:'เบิกภายใน • '+x.doc})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];

@@ -95,7 +95,7 @@ export async function matchOCR(env, base64, mime){
 เริ่มอ่าน ref จากบรรทัด เลขที่รายการ / Transaction ID ใต้หัวข้อ Transfer Completed ด้านบนของสลิป K BIZ คัดลอกรหัสทั้งหมดทั้งตัวอักษรและตัวเลขตามภาพ (มักขึ้นต้น TRTS หรือ TRBS) รหัสนี้คือเลขอ้างอิงธุรกรรมที่ต้องการ ห้ามใช้เลขบัญชีหรือวันที่แทน ห้ามเดาหรือเพิ่มลดตัวเลข ถ้าอ่านไม่ได้จริงให้ null
 ห้ามเดาตัวเลขที่ซ่อน สลิป K BIZ เช่น xxx-x-x9079-x ให้คงเป็น xxx-x-x9079-x ไม่ใช่ 9079 เพราะตัวสุดท้ายก็ถูกซ่อน ชื่อธนาคารผู้รับอ่านจากฝั่ง To ไม่ใช่โลโก้หัวกระดาษหรือฝั่ง From ชื่อบริษัทผู้โอนอ่านจากฝั่ง From เท่านั้น ถ้าอ่านไม่ได้ให้ null ยอดใช้จำนวนเงินโอน ไม่รวมค่าธรรมเนียม`;
   const read=async instruction=>{
-  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
+  const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',signal:AbortSignal.timeout(60000),
     headers:{'x-api-key':key,'anthropic-version':CFG.CLAUDE_VERSION,'Content-Type':'application/json'},
     body:JSON.stringify({model:CFG.CLAUDE_MODEL,max_tokens:1000,messages:[
       {role:'user',content:[{type:'image',source:{type:'base64',media_type:mt,data:base64}},{type:'text',text:instruction}]},

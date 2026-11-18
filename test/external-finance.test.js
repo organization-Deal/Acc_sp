@@ -113,3 +113,19 @@ test('legacy approvals migrate only if original financial data matches, preservi
  r.fields[EF.audit]=JSON.stringify(audit);r.fields['ยอดโอนเงิน']=999;await poll(h.owner);assert.equal(JSON.parse(r.fields[EF.audit]).fingerprintVersion,undefined);assert.equal(await externalStage(externalRow('partner',r)),'changed');
  }finally{h.restore();}
 });
+
+test('PDF layout refresh preserves approvals, financial identity, and active review cards',async()=>{
+ const h=harness();try{
+  const r=record('dealpay');r.fields[EF.request]=true;h.rows.dealpay.push(r);await externalTick(h.owner);
+  await externalCallback(h.owner,h.callback(h.db.get(h.db.get('external:active:not')[0])));await externalTick(h.owner);
+  const beforeAudit=r.fields[EF.audit],beforeHash=await externalFingerprint(externalRow('dealpay',r)),beforeCards=h.cards.size,number=r.fields[ED.number];
+  const meta=documentMeta(externalRow('dealpay',r)),oldFile=meta.request.file;delete meta.request.templateVersion;r.fields[ED.meta]=JSON.stringify(meta);
+  const key=[...h.db.keys()].find(k=>k.startsWith('external:document:')&&k.endsWith(':pdf:2'));
+  const oldJob=h.db.get(key);h.db.delete(key);h.db.set(key.replace(/:pdf:2$/,''),oldJob);
+  assert.equal(await externalStage(externalRow('dealpay',r)),'may');await poll(h.owner);
+  assert.equal(r.fields[EF.audit],beforeAudit);assert.equal(await externalFingerprint(externalRow('dealpay',r)),beforeHash);
+  assert.equal(h.cards.size,beforeCards);assert.equal(r.fields[ED.number],number);assert.equal(await externalStage(externalRow('dealpay',r)),'may');
+  const refreshed=documentMeta(externalRow('dealpay',r));assert.equal(refreshed.request.templateVersion,2);assert.notEqual(refreshed.request.file,oldFile);assert.equal(refreshed.request.revision,meta.request.revision+1);
+  assert.ok(r.fields[ED.history].some(a=>a.file_token===oldFile));await poll(h.owner);assert.equal(h.files.size,2);
+ }finally{h.restore();}
+});

@@ -5,7 +5,7 @@ import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
-import {transferPage,portalAuth,portalAction,internalTransferRows} from './transfer.js';
+import {transferPage,portalAuth,portalAction,internalTransferRows,slipFits} from './transfer.js';
 
 export const EXTERNAL_FLOW_VERSION='external-flow-v2-documents';
 export const EF={request:'บัญชีเช็กแล้ว → ส่งให้นอต',status:'สถานะงาน',not:'นอตตรวจผ่าน',may:'เมย์อนุมัติ',delivery:'หลักฐานส่งให้นอต',audit:'ข้อมูล Flow (ระบบ)'};
@@ -241,7 +241,7 @@ export async function externalPortalAuth(owner,token){
  if(!saved||saved.retired||saved.stage!=='transfer'||Date.now()-saved.created>7*86400000||saved.recipient!==(await people(owner.env)).not)throw Error('ลิงก์หมดอายุ เปิดการ์ดรอโอนล่าสุด');return saved;
 }
 const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+(textOf(x.r.fields[ED.number])||x.doc),company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,amount:x.amount,currency:x.currency,bills:1,pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
-export function externalSlipFits(o,x){const acc=eDigits(o.recipient_acct);return Number.isFinite(Number(o.amount))&&Math.round(Number(o.amount)*100)===Math.round(x.amount*100)&&String(o.currency||'').toUpperCase()===x.currency&&acc.length>=4&&x.account.endsWith(acc);}
+export function externalSlipFits(o,x){return slipFits(o,{...x,company_id:x.company.id});}
 export async function externalPortalAction(owner,b,session){
  const saved=session||await externalPortalAuth(owner,b.token),{ctx,env}=owner;
  if(saved.stage!=='transfer')throw Error('รายการทดสอบไม่รับสลิปจริง');
@@ -287,6 +287,7 @@ export async function unifiedPortalAuth(owner,token){
 export async function unifiedPortalAction(owner,b){
  const saved=await unifiedPortalAuth(owner,b.token);
  if(saved.stage==='test')return portalAction(owner,b,saved);
+ if(['resume','reread'].includes(b.op))return portalAction(owner,b,saved);
  if(b.op==='rows'){
   const [internal,external]=await Promise.all([internalTransferRows(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);
   const rows=[...internal.map(({source,...x})=>({...x,doc:'เบิกภายใน • '+x.doc})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];

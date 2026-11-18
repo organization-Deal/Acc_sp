@@ -42,6 +42,11 @@ test('table review consumes one request, routes to Not and preserves review on r
  globalThis.fetch=async(url,opt={})=>{if(opt.method==='PUT'){const fields=JSON.parse(opt.body).fields;writes.push(fields);Object.assign(r.fields,fields);}return new Response(JSON.stringify({code:0,data:{record:structuredClone(r)}}));};
  try {
   await tableReview(env,{r,j});assert.equal(r.fields[TABLE_REQUEST],false);assert.equal(await checkedStage(r,j),'not');assert.equal(r.fields.Approve,undefined);
+  const oldReview=r.fields['เวลาบัญชีตรวจผ่าน'];
+  const saved={stage:'not',created:Date.now(),nonce:'old',signatures:[[r.record_id,await fingerprint(r,j),'',[],oldReview,0,0]]};
+  r.fields[TABLE_REQUEST]=true;await tableReview(env,{r,j});
+  assert.equal(r.fields['เวลาบัญชีตรวจผ่าน'],oldReview);assert.ok(r.fields['เวลาขอส่งให้นอตซ้ำ']>0);assert.equal(r.fields['สถานะส่งให้นอต'],'รอส่งอีกครั้ง');
+  const {reviewRows}=await import('../src/finance.js');assert.match((await reviewRows(saved,[{r,j}],{get:async()=>null}))[0].reviewStatus,/ใช้การ์ดล่าสุด/);
   const at=r.fields['เวลาบัญชีตรวจผ่าน'];r.fields['นอตตรวจผ่าน']=true;r.fields['ผู้ตรวจสอบก่อนอนุมัติ']='N';r.fields['เวลานอตตรวจผ่าน']=123;r.fields['ข้อมูลที่นอตตรวจผ่าน']=await fingerprint(r,j);
   r.fields[TABLE_REQUEST]=true;await tableReview(env,{r,j});assert.equal(r.fields['เวลาบัญชีตรวจผ่าน'],at);assert.equal(await checkedStage(r,j),'may');
   r.fields[TABLE_REQUEST]=true;r.fields.Approve=true;await tableReview(env,{r,j});assert.equal(r.fields.Approve,true);assert.match(r.fields['ผลตรวจบัญชี (ระบบ)'],/ไม่ส่งซ้ำ/);

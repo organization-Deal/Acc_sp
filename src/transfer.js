@@ -54,7 +54,7 @@ export async function upgradeDraft(owner,d,image,mime){
  if(await digest(image)!==d.hash)throw Error('ภาพสลิปไม่ตรงกับไฟล์เดิม');
  if(await owner.ctx.storage.get('paidHash:'+d.hash))throw Error('สลิปนี้แนบสำเร็จแล้ว');
  const o=await matchOCR(owner.env,image,mime),ref=String(o.ref||'').replace(/\s/g,'');
- if(!/^[A-Za-z0-9_-]{6,80}$/.test(ref))throw Error('อ่านเลขอ้างอิงสลิปไม่ได้ กรุณาใช้ภาพชัดเจน');
+ if(!/^[A-Za-z0-9_-]{6,80}$/.test(ref))throw Error('เลขอ้างอิงที่อ่านได้ไม่ถูกต้อง: '+ref.slice(0,80));
  if(ref!==d.ref){
   const newKey='paidRef:'+await digest(ref);
   if(await owner.ctx.storage.get(d.refKey)||await owner.ctx.storage.get(newKey))throw Error('เลขอ้างอิงสลิปถูกใช้งานแล้ว กรุณาตรวจรายการเดิม');

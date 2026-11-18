@@ -226,7 +226,7 @@ async function handleMessage(event, env) {
 // ════════════════════════════════════════════════════════════════
 export class SessionDO extends DurableObject {
   async transferAccess(k){await unifiedPortalAuth(this,k);return true;}
-  async transferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>unifiedPortalAction(this,b));this.financeSerial=run.catch(()=>{});return run;}
+  async transferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>unifiedPortalAction(this,b));this.financeSerial=run.catch(()=>{});this.ctx.waitUntil(this.financeSerial);return run;}
 
   async financePoll() {
     const run=(this.financeSerial||Promise.resolve()).then(async()=>{const results=await Promise.allSettled([financeTick(this,{unifiedTransfers:true}),externalTick(this,{unified:true})]);for(let i=0;i<results.length;i++)if(results[i].status==='rejected')console.log(i?'EXTERNAL_FINANCE_ERROR':'FINANCE_ERROR',results[i].reason?.message);return results.map(r=>r.status==='fulfilled'?r.value:{error:String(r.reason?.message)});});
@@ -239,7 +239,7 @@ export class SessionDO extends DurableObject {
   async externalDecide(body){const run=(this.financeSerial||Promise.resolve()).then(async()=>{const r=await externalCallback(this,body);await externalTick(this,{unified:true});return r;});this.financeSerial=run.catch(()=>{});return run;}
   async externalDocumentAccess(b){return unifiedDocumentAccess(this,b);}
   async externalTransferAccess(k){await unifiedPortalAuth(this,k);return true;}
-  async externalTransferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>unifiedPortalAction(this,b));this.financeSerial=run.catch(()=>{});return run;}
+  async externalTransferAction(b){return this.transferAction(b);}
 
   async #load()  {
     const s = (await this.ctx.storage.get('session')) || {};

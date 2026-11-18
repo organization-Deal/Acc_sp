@@ -187,7 +187,7 @@ export async function externalPortalAuth(owner,token){
  const key=await owner.ctx.storage.get('external:nonce:'+token),saved=key&&await owner.ctx.storage.get(key);
  if(!saved||saved.retired||saved.stage!=='transfer'||Date.now()-saved.created>7*86400000||saved.recipient!==(await people(owner.env)).not)throw Error('ลิงก์หมดอายุ เปิดการ์ดรอโอนล่าสุด');return saved;
 }
-const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+x.doc,company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,amount:x.amount,currency:x.currency,bills:1,pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
+const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+(textOf(x.r.fields[ED.number])||x.doc),company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,amount:x.amount,currency:x.currency,bills:1,pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
 export function externalSlipFits(o,x){const acc=eDigits(o.recipient_acct);return Number.isFinite(Number(o.amount))&&Math.round(Number(o.amount)*100)===Math.round(x.amount*100)&&String(o.currency||'').toUpperCase()===x.currency&&acc.length>=4&&x.account.endsWith(acc);}
 export async function externalPortalAction(owner,b){
  const saved=await externalPortalAuth(owner,b.token),{ctx,env}=owner;

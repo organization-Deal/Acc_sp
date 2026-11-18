@@ -97,12 +97,12 @@ async function patch(env,id,c){return api(env,'im/v1/messages/'+encodeURICompone
 // Keep a review card's membership stable while its remaining documents are reviewed.
 export async function reviewRows(saved,all,storage){
  const out=[];
- for(const [id,expected,,,accountingAt,notAt] of saved.signatures){
+ for(const [id,expected,,,accountingAt,notAt,resendAt] of saved.signatures){
   const source=all.find(x=>x.r.record_id===id),x=source?{...source}:{r:{record_id:id,fields:{}},j:null};
   const f=x.r.fields,done=await storage.get('decision:'+saved.nonce+':'+id);
   const same=x.j&&await fingerprint(x.r,x.j)===expected;
   const stage=x.j?await checkedStage(x.r,x.j):'missing';
-  const epoch=(accountingAt===undefined||accountingAt===(f['เวลาบัญชีตรวจผ่าน']||0))&&(notAt===undefined||saved.stage==='not'||notAt===(f['เวลานอตตรวจผ่าน']||0));
+  const epoch=(saved.stage!=='not'||(resendAt||0)===(f['เวลาขอส่งให้นอตซ้ำ']||0))&&(accountingAt===undefined||accountingAt===(f['เวลาบัญชีตรวจผ่าน']||0))&&(notAt===undefined||saved.stage==='not'||notAt===(f['เวลานอตตรวจผ่าน']||0));
   if(saved.retired||Date.now()-saved.created>7*86400000)x.reviewStatus='⚠️ การ์ดนี้สิ้นสุดแล้ว ใช้การ์ดล่าสุด';
   else if(!same)x.reviewStatus='⚠️ ข้อมูลเปลี่ยน ต้องตรวจเอกสารฉบับล่าสุด';
   else if(stage==='returned')x.reviewStatus='↩️ ส่งกลับแก้ไขแล้ว';
@@ -126,9 +126,10 @@ export async function recordNotDelivery(owner,key,saved,all){
  if(saved.stage!=='not'||!saved.sent||!saved.message)return;
  const {env,ctx}=owner;
  const targets=[];
- for(const [id,expected,,,accountingAt] of saved.signatures){
+ for(const [id,expected,,,accountingAt,,resendAt] of saved.signatures){
   const x=all.find(x=>x.r.record_id===id);if(!x?.j)continue;
   if(await fingerprint(x.r,x.j)!==expected||accountingAt!==undefined&&accountingAt!==(x.r.fields['เวลาบัญชีตรวจผ่าน']||0))continue;
+  if((resendAt||0)!==(x.r.fields['เวลาขอส่งให้นอตซ้ำ']||0))continue;
   targets.push(x);
  }
  if(!targets.length)return;
@@ -156,7 +157,7 @@ export async function tableReview(env,x){
  if(problem){fields['ผลตรวจบัญชี (ระบบ)']=problem;if(!x.r.fields[DELIVERY_ID])fields[DELIVERY_STATUS]='ยังไม่ส่ง • '+problem;}
  else {
   const hash=await fingerprint(x.r,x.j);
-  if(x.r.fields['บัญชีตรวจผ่าน']===true&&textOf(x.r.fields['ข้อมูลที่บัญชีตรวจผ่าน'])===hash&&!x.r.fields['ส่งกลับแก้ไขก่อนอนุมัติ']){fields['ผลตรวจบัญชี (ระบบ)']=x.r.fields[DELIVERY_ID]?'ส่งให้นอตแล้ว ไม่ส่งซ้ำ':'รับคำสั่งแล้ว • รอส่งให้นอต';if(!x.r.fields[DELIVERY_ID])fields[DELIVERY_STATUS]='รอส่ง';}
+  if(x.r.fields['บัญชีตรวจผ่าน']===true&&textOf(x.r.fields['ข้อมูลที่บัญชีตรวจผ่าน'])===hash&&!x.r.fields['ส่งกลับแก้ไขก่อนอนุมัติ']){if(x.r.fields['นอตตรวจผ่าน']===true){fields['ผลตรวจบัญชี (ระบบ)']='นอตตรวจผ่านแล้ว • ไม่ย้อนขั้นอนุมัติ';}else {fields['เวลาขอส่งให้นอตซ้ำ']=Math.max(Date.now(),Number(x.r.fields['เวลาขอส่งให้นอตซ้ำ']||0)+1);fields['ผลตรวจบัญชี (ระบบ)']='รับคำสั่งส่งอีกครั้ง • รอส่งให้นอต';fields[DELIVERY_STATUS]='รอส่งอีกครั้ง';}}
   else Object.assign(fields,{'บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'ตรวจผ่านจากปุ่มในตารางสรุปรอบเบิก','เวลาบัญชีตรวจผ่าน':Date.now(),'ข้อมูลที่บัญชีตรวจผ่าน':hash,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','ผู้ตรวจสอบก่อนอนุมัติ':'','เวลานอตตรวจผ่าน':null,'ส่งกลับแก้ไขก่อนอนุมัติ':false,Reject:false,'ผลตรวจบัญชี (ระบบ)':'บัญชีตรวจผ่าน • รอส่งให้นอต',[DELIVERY_STATUS]:'รอส่ง',[DELIVERY_AT]:null,[DELIVERY_ID]:''});
  }
  await api(env,recordsPath(SUMMARY)+'/'+x.r.record_id,'PUT',{fields});
@@ -187,7 +188,7 @@ export async function financeTick(owner){
    }
    const remaining=groups[stage].filter(x=>!covered.has(x.r.record_id)).sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));
    for(let i=0;i<remaining.length&&sends<4;i+=5){
-    const chunk=remaining.slice(i,i+5),signatures=await Promise.all(chunk.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),linkOf(x.r.fields['PDF อนุมัติแล้ว']),x.r.fields['หลักฐานการโอน']||[],x.r.fields['เวลาบัญชีตรวจผ่าน']||0,x.r.fields['เวลานอตตรวจผ่าน']||0]));
+    const chunk=remaining.slice(i,i+5),signatures=await Promise.all(chunk.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),linkOf(x.r.fields['PDF อนุมัติแล้ว']),x.r.fields['หลักฐานการโอน']||[],x.r.fields['เวลาบัญชีตรวจผ่าน']||0,x.r.fields['เวลานอตตรวจผ่าน']||0,...(stage==='not'?[x.r.fields['เวลาขอส่งให้นอตซ้ำ']||0]:[])]));
     const key='card:v3:'+stage+':'+await digest([signatures,recipients[stage]]);
     let saved=await ctx.storage.get(key);
     if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:recipients[stage]};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}

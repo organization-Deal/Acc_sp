@@ -47,3 +47,41 @@ test('table review consumes one request, routes to Not and preserves review on r
   r.fields[TABLE_REQUEST]=true;r.fields.Approve=true;await tableReview(env,{r,j});assert.equal(r.fields.Approve,true);assert.match(r.fields['ผลตรวจบัญชี (ระบบ)'],/ไม่ส่งซ้ำ/);
  }finally{globalThis.fetch=realFetch;}
 });
+
+import {financeTick,financeCallback,SUMMARY,LEDGER} from '../src/finance.js';
+import {CFG} from '../src/config.js';
+test('five sequential approvals survive polls and only remaining buttons stay; duplicate and changed data are safe',async()=>{
+ const rows=[];for(let i=0;i<5;i++){
+  const j={key:'k'+i,summaryId:'r'+i,state:'DONE',company:{id:'PSH',name:'Company'},employee:{name:'Employee',accountName:'Employee',accountNo:'1234567890',bankName:'SCB'},currency:'THB',docId:'doc'+i,docNo:'D'+i,pdfUrl:'https://example.com/'+i,items:[{amount:10}]};
+  const r={record_id:'r'+i,fields:{'รหัสงานระบบ':j.key,'บริษัท':'Company','รหัสบริษัท':'PSH','ชื่อพนักงาน':'Employee','ชื่อบัญชี':'Employee','เลขบัญชี':'1234567890','ธนาคาร':'SCB','Doc ID':j.docId,'เลขใบขอเบิก':j.docNo,'ใบขอเบิก PDF':{link:j.pdfUrl},'ยอดรวม':10,'จำนวนรายการ':1,'สถานะ':'สร้างแล้ว','บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'A','เวลาบัญชีตรวจผ่าน':123}};
+  r.fields['ข้อมูลที่บัญชีตรวจผ่าน']=await fingerprint(r,j);rows.push({r,j});
+ }
+ const db=new Map(),cards=new Map(),writes=[];
+ const owner={env:{FINANCE_ENABLED:'true',LARK_VERIFICATION_TOKEN:'secret',KV:{get:async()=> 'token'}},ctx:{storage:{get:async k=>structuredClone(db.get(k)),put:async(k,v)=>db.set(k,structuredClone(v))}}};
+ const real=globalThis.fetch;let n=0;
+ globalThis.fetch=async(url,opt)=>{const path=new URL(url).pathname,body=opt.body?JSON.parse(opt.body):{};let data={};
+  if(path.includes('/im/v1/messages')){if(opt.method==='POST'){const id='m'+(++n);cards.set(id,JSON.parse(body.content));data.message_id=id;}else cards.set(path.split('/').pop(),JSON.parse(body.content));}
+  else if(path.includes(CFG.T_EMPLOYEE))data.items=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
+  else if(path.includes(LEDGER))data.items=rows.map(x=>({fields:{'ข้อมูลงาน JSON':JSON.stringify(x.j)}}));
+  else if(path.includes(SUMMARY)){const row=rows.find(x=>path.endsWith('/'+x.r.record_id));if(row){if(opt.method==='PUT'){writes.push(row.r.record_id);Object.assign(row.r.fields,body.fields);}data.record=structuredClone(row.r);}else data.items=rows.map(x=>structuredClone(x.r));}
+  else throw Error('Unexpected URL '+path);
+  return new Response(JSON.stringify({code:0,data}));
+ };
+ try{
+  await financeTick(owner);const key=db.get('active:not')[0],saved=db.get(key),msg=saved.message;
+  const callback=id=>({header:{token:'secret',app_id:CFG.LARK_APP_ID,event_type:'card.action.trigger'},event:{operator:{open_id:'ou_not'},action:{value:{nonce:saved.nonce,action:'accept',id}}}});
+  for(let i=0;i<5;i++){
+   await financeCallback(owner,callback('r'+i));
+   const buttons=cards.get(msg).elements.filter(e=>e.tag==='action').flatMap(e=>e.actions).filter(b=>b.value?.action==='accept');
+   assert.equal(buttons.length,4-i);assert.ok(!buttons.some(b=>b.value.id==='r'+i));
+   await financeTick(owner);assert.ok(!db.get(key).retired);
+   if(i<4)assert.deepEqual(db.get('active:not'),[key]);
+  }
+  assert.equal(writes.length,5);await financeCallback(owner,callback('r0'));assert.equal(writes.length,5);
+  assert.match(JSON.stringify(cards.get(msg)),/เหลือให้กด 0/);
+  // May's card cannot approve changed financial data.
+  const may=db.get(db.get('active:may')[0]);rows[0].r.fields['ยอดรวม']=99;
+  const bad=callback('r0');bad.event.operator.open_id='ou_may';bad.event.action.value.nonce=may.nonce;
+  await financeCallback(owner,bad);assert.equal(writes.length,5);assert.equal(rows[0].r.fields.Approve,undefined);
+ }finally{globalThis.fetch=real;}
+});

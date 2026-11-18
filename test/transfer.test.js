@@ -1,8 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
-import {slipFits,transferPage,portalAction} from '../src/transfer.js';
+import {slipFits,transferPage,portalAction,reviewDraftReference} from '../src/transfer.js';
 import {matchOCR} from '../src/match.js';
+test('reference review is owned, audited and refuses reserved or completed slips',async()=>{
+ const d={id:'a',owner:'not',at:Date.now(),hash:'hash',ref:'WRONG123',refKey:'old-ref',file:'original',ocr:{amount:64}};
+ const mem=new Map([['draft:a',d]]),owner={ctx:{storage:{get:async k=>structuredClone(mem.get(k)),put:async(k,v)=>mem.set(k,structuredClone(v))}}};
+ await assert.rejects(()=>reviewDraftReference(owner,'a','TRBS261119186623701',{recipient:'other'}),/หมดอายุ/);
+ await assert.rejects(()=>reviewDraftReference(owner,'a','',{recipient:'not'}),/กรอก/);
+ const {draft:r}=await reviewDraftReference(owner,'a','TRBS261119186623701',{recipient:'not'});
+ assert.equal(r.ref,'TRBS261119186623701');assert.equal(r.originalOcrRef,'WRONG123');assert.equal(r.referenceHistory[0].by,'not');assert.equal(r.file,'original');assert.equal(r.hash,'hash');assert.equal(r.ocrVersion,undefined);
+ assert.deepEqual(mem.get('draftHash:hash'),r);assert.deepEqual(mem.get('external:draft:a'),r);
+ mem.set(r.refKey,{id:'reserved'});await assert.rejects(()=>reviewDraftReference(owner,'a','ANOTHER123',{recipient:'not'}),/ถูกใช้แล้ว/);
+ mem.delete(r.refKey);mem.set('paidHash:hash',{id:'done'});await assert.rejects(()=>reviewDraftReference(owner,'a','ANOTHER123',{recipient:'not'}),/ถูกใช้แล้ว/);
+});
 test('OCR retries only a missing transaction ID without replacing the payment fields',async()=>{
  const real=globalThis.fetch;let calls=0;
  const payment={amount:40,currency:'THB',ref:null,recipient_acct_mask:'xxx-x-x9079-x',sender_name:'OMNI DASH PAY WALLET CO.,LTD.',recipient_bank:'Krung Thai Bank'};
@@ -97,5 +108,7 @@ test('reread recovers masked OCR from the saved image without uploading or chang
   const cached={...d,ref:'TRX123'};mem.set('draftHash:'+d.hash,cached);
   const reused=await portalAction(owner,{op:'prepare',image:'/9j/AA==',mime:'image/jpeg',filename:'original.jpg'},{stage:'transfer',recipient:'not'});
   assert.equal(reused.draft.id,'d');assert.equal(reused.draft.ocrVersion,2);assert.equal(reused.draft.file,'saved-image');
+  mem.set('draft:d',{...d,ref:'REVIEWED123',referenceReviewedAt:Date.now()});
+  const reviewed=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(reviewed.draft.ref,'REVIEWED123');assert.equal(reviewed.draft.ocr.ref,'REVIEWED123');
  }finally{globalThis.fetch=real;}
 });

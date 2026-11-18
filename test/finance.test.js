@@ -116,7 +116,7 @@ test('partial rate limits persist retry intent, update shared card and never rep
   if(path.includes('/im/v1/messages')){if(opt.method==='POST'){const id='m'+(++n);cards.set(id,JSON.parse(body.content));data.message_id=id;}else cards.set(path.split('/').pop(),JSON.parse(body.content));}
   else if(path.includes(CFG.T_EMPLOYEE))data.items=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
   else if(path.includes(LEDGER))data.items=rows.map(x=>({fields:{'ข้อมูลงาน JSON':JSON.stringify(x.j)}}));
-  else if(path.includes(SUMMARY)){if(path.endsWith('/batch_update')){for(const u of body.records)Object.assign(rows.find(x=>x.r.record_id===u.record_id).r.fields,u.fields);data.records=body.records;}else{const row=rows.find(x=>path.endsWith('/'+x.r.record_id));if(row){if(opt.method==='GET'&&failures.delete(row.r.record_id))return new Response(JSON.stringify({code:1254290,msg:'TooManyRequest'}));if(opt.method==='PUT'){writes.push(row.r.record_id);Object.assign(row.r.fields,body.fields);}data.record=structuredClone(row.r);}else data.items=rows.map(x=>structuredClone(x.r));}}
+  else if(path.includes(SUMMARY)){if(path.endsWith('/batch_update')){for(const u of body.records)Object.assign(rows.find(x=>x.r.record_id===u.record_id).r.fields,u.fields);data.records=body.records;}else{const row=rows.find(x=>path.endsWith('/'+x.r.record_id));if(row){if(opt.method==='PUT'&&failures.delete(row.r.record_id))return new Response(JSON.stringify({code:1254290,msg:'TooManyRequest'}));if(opt.method==='PUT'){writes.push(row.r.record_id);Object.assign(row.r.fields,body.fields);}data.record=structuredClone(row.r);}else data.items=rows.map(x=>structuredClone(x.r));}}
   else throw Error('Unexpected URL '+path);
   return new Response(JSON.stringify({code:0,data}));
  };
@@ -138,5 +138,45 @@ test('partial rate limits persist retry intent, update shared card and never rep
   rows[0].r.fields['นอตตรวจผ่าน']=false;rows[0].r.fields['เวลาขอส่งให้นอตซ้ำ']=12345;
   await financeCallback(owner,{...b,header:{...b.header,event_id:'new-event'},event:{...b.event,action:{value:{nonce:saved.nonce,action:'accept',id:'r0'}}}});
   assert.equal(writes.length,5);
+ }finally{globalThis.fetch=real;}
+});
+
+test('retry revalidates changed financial data and never approves altered rows',async()=>{
+ const rows=[];for(let i=0;i<5;i++){
+  const j={key:'k'+i,summaryId:'r'+i,state:'DONE',company:{id:'PSH',name:'Company'},employee:{name:'Employee',accountName:'Employee',accountNo:'1234567890',bankName:'SCB'},currency:'THB',docId:'doc'+i,docNo:'D'+i,pdfUrl:'https://example.com/'+i,items:[{amount:10}]};
+  const r={record_id:'r'+i,fields:{'รหัสงานระบบ':j.key,'บริษัท':'Company','รหัสบริษัท':'PSH','ชื่อพนักงาน':'Employee','ชื่อบัญชี':'Employee','เลขบัญชี':'1234567890','ธนาคาร':'SCB','Doc ID':j.docId,'เลขใบขอเบิก':j.docNo,'ใบขอเบิก PDF':{link:j.pdfUrl},'ยอดรวม':10,'จำนวนรายการ':1,'สถานะ':'สร้างแล้ว','บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'A','เวลาบัญชีตรวจผ่าน':123}};
+  r.fields['ข้อมูลที่บัญชีตรวจผ่าน']=await fingerprint(r,j);rows.push({r,j});
+ }
+ const db=new Map(),cards=new Map(),writes=[];
+ const owner={env:{FINANCE_ENABLED:'true',LARK_VERIFICATION_TOKEN:'secret',KV:{get:async()=> 'token'}},ctx:{storage:{get:async k=>structuredClone(db.get(k)),put:async(k,v)=>db.set(k,structuredClone(v))}}};
+ const real=globalThis.fetch;let n=0;const failures=new Set(['r1','r3']);
+ globalThis.fetch=async(url,opt)=>{const path=new URL(url).pathname,body=opt.body?JSON.parse(opt.body):{};let data={};
+  if(path.includes('/im/v1/messages')){if(opt.method==='POST'){const id='m'+(++n);cards.set(id,JSON.parse(body.content));data.message_id=id;}else cards.set(path.split('/').pop(),JSON.parse(body.content));}
+  else if(path.includes(CFG.T_EMPLOYEE))data.items=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
+  else if(path.includes(LEDGER))data.items=rows.map(x=>({fields:{'ข้อมูลงาน JSON':JSON.stringify(x.j)}}));
+  else if(path.includes(SUMMARY)){if(path.endsWith('/batch_update')){for(const u of body.records)Object.assign(rows.find(x=>x.r.record_id===u.record_id).r.fields,u.fields);data.records=body.records;}else{const row=rows.find(x=>path.endsWith('/'+x.r.record_id));if(row){if(opt.method==='PUT'&&failures.delete(row.r.record_id))return new Response(JSON.stringify({code:1254290,msg:'TooManyRequest'}));if(opt.method==='PUT'){writes.push(row.r.record_id);Object.assign(row.r.fields,body.fields);}data.record=structuredClone(row.r);}else data.items=rows.map(x=>structuredClone(x.r));}}
+  else throw Error('Unexpected URL '+path);
+  return new Response(JSON.stringify({code:0,data}));
+ };
+ try{
+  await financeTick(owner);const key=db.get('active:not')[0];let saved=db.get(key);
+  assert.equal(cards.get(saved.message).config.update_multi,true);
+  // Reproduce legacy cards and two rate-limited reads during a five-item human action.
+  saved.shared=false;db.set(key,saved);
+  const b={header:{token:'secret',app_id:CFG.LARK_APP_ID,event_type:'card.action.trigger',event_id:'event-rate'},event:{operator:{open_id:'ou_not'},action:{value:{nonce:saved.nonce,action:'accept-all'}}}};
+  let result=await financeCallback(owner,b);assert.equal(result.retry,true);assert.equal(writes.length,3);
+  const message=db.get(key).message;assert.notEqual(message,saved.message);assert.equal(cards.get(message).config.update_multi,true);
+  const c=cards.get(message);assert.match(JSON.stringify(c),/ยังไม่สำเร็จ/);assert.match(JSON.stringify(c),/เหลือให้กด 2 \/ 5/);
+  assert.equal(c.elements.filter(e=>e.tag==='action').flatMap(e=>e.actions).filter(b=>b.value?.action==='accept').length,2);
+  assert.equal([...db.keys()].filter(k=>k.startsWith('finance-retry:')).length,1);
+  rows[1].r.fields['ยอดรวม']=999;
+  const retryKey=db.get('pending-finance-retries')[0];db.get(retryKey).nextAt=0;await financeTick(owner);
+  assert.equal(writes.length,4);assert.equal(rows[1].r.fields['นอตตรวจผ่าน'],undefined);
+  assert.equal(db.get(retryKey).done,true);assert.deepEqual(db.get('pending-finance-retries'),[]);
+  assert.match(JSON.stringify(cards.get(message)),/ข้อมูลเปลี่ยน/);
+  // Explicitly stale resend revision is rejected, regardless of authenticated actor.
+  rows[0].r.fields['นอตตรวจผ่าน']=false;rows[0].r.fields['เวลาขอส่งให้นอตซ้ำ']=12345;
+  await financeCallback(owner,{...b,header:{...b.header,event_id:'new-event'},event:{...b.event,action:{value:{nonce:saved.nonce,action:'accept',id:'r0'}}}});
+  assert.equal(writes.length,4);
  }finally{globalThis.fetch=real;}
 });

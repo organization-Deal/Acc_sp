@@ -44,7 +44,7 @@ test('full 11-record flow starts only at accounting and sends Not → May → No
   for(const r of Object.values(h.rows).flat())r.fields[EF.request]=true;
   await externalTick(h.owner);assert.equal(h.cards.size,3);assert.ok([...h.cards.values()].every(c=>c.to==='ou_not'));
   const notKeys=[...h.db.get('external:active:not')];for(const k of notKeys){const saved=h.db.get(k);assert.ok((await externalCallback(h.owner,h.callback(saved))).ok);}
-  await externalTick(h.owner);assert.equal(h.db.get('external:active:not').length,0);const mayKeys=[...h.db.get('external:active:may')];assert.equal(mayKeys.length,3);
+  await externalTick(h.owner);assert.equal(h.db.get('external:active:not').length,0);const mayKeys=[...h.db.get('external:active:may')];assert.equal(mayKeys.length,3);for(const r of Object.values(h.rows).flat())assert.ok(JSON.parse(r.fields[EF.audit]).delivery.may.message);
   for(const k of mayKeys){const saved=h.db.get(k);assert.equal(saved.recipient,'ou_may');assert.ok((await externalCallback(h.owner,h.callback(saved))).ok);}
   await externalTick(h.owner);assert.equal(h.db.get('external:active:transfer').length,3);
   for(const kind of Object.keys(h.rows))for(const r of h.rows[kind]){assert.equal(await externalStage(externalRow(kind,r)),'transfer');assert.notEqual(r.fields['รายการสำเร็จ'],true);assert.notEqual(r.fields['จ่ายแล้ว (PEAK)'],true);assert.match(r.fields[EF.delivery],/^ส่งแล้ว/);}

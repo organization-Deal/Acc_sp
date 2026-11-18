@@ -226,11 +226,13 @@ async function handleMessage(event, env) {
 // ════════════════════════════════════════════════════════════════
 export class SessionDO extends DurableObject {
   async transferAccess(k){await unifiedPortalAuth(this,k);return true;}
-  async transferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>unifiedPortalAction(this,b));this.financeSerial=run.catch(()=>{});this.ctx.waitUntil(this.financeSerial);return run;}
+  async transferAction(b){if(['rows','resume'].includes(b.op))return unifiedPortalAction(this,b);const run=(this.financeSerial||Promise.resolve()).then(()=>unifiedPortalAction(this,b));this.financeSerial=run.catch(()=>{});this.ctx.waitUntil(this.financeSerial);return run;}
 
   async financePoll() {
+    if(this.financePollPending)return {skipped:true,reason:'poll already queued or running'};
+    this.financePollPending=true;
     const run=(this.financeSerial||Promise.resolve()).then(async()=>{const results=await Promise.allSettled([financeTick(this,{unifiedTransfers:true}),externalTick(this,{unified:true})]);for(let i=0;i<results.length;i++)if(results[i].status==='rejected')console.log(i?'EXTERNAL_FINANCE_ERROR':'FINANCE_ERROR',results[i].reason?.message);return results.map(r=>r.status==='fulfilled'?r.value:{error:String(r.reason?.message)});});
-    this.financeSerial=run.catch(()=>{});return run;
+    this.financeSerial=run.catch(()=>{});this.ctx.waitUntil(this.financeSerial);try{return await run;}finally{this.financePollPending=false;}
   }
   async financeDecide(body) {
     const run=(this.financeSerial||Promise.resolve()).then(()=>financeCallback(this,body));

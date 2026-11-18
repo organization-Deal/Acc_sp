@@ -157,6 +157,7 @@ function renderSlips(){
   const el=document.createElement('div');el.className='slip';
   el.innerHTML=(s.url?'<img src="'+esc(s.url)+'">':'<div></div>')+'<div><strong>'+esc(s.name)+'</strong><p>'+esc(s.error||(s.done?'แนบสำเร็จ • รายการสำเร็จแล้ว':s.draft?fmt(s.draft.ocr.amount)+' '+s.draft.ocr.currency+' · '+s.draft.ocr.recipient_name+' · '+(s.draft.ocr.recipient_acct_mask||s.draft.ocr.recipient_acct):'รออ่านสลิป'))+'</p></div>';
   const box=el.lastChild;
+  if(s.draft&&!s.error){const detail=document.createElement('p');detail.className='muted';detail.textContent='ธนาคารผู้รับ: '+(s.draft.ocr.recipient_bank||'อ่านไม่ได้')+' • เลขที่รายการ: '+s.draft.ref;box.append(detail);}
   if(s.draft&&!s.done){
    const o=s.draft.ocr,detected=payerCompany(o),all=slipChoices(o,rows,'');
    if(!s.company&&!s.manualCompany)s.company=detected||(all.length===1?all[0].company_id:'');

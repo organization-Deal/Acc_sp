@@ -235,6 +235,8 @@ export async function financeCallback(owner,b){
    // Read record immediately before mutation, and compare with issued card again.
    x.r=(await api(env,recordsPath(SUMMARY)+'/'+id)).record;
    if(await checkedStage(x.r,x.j)!==saved.stage||await fingerprint(x.r,x.j)!==expected)throw Error('ข้อมูลเปลี่ยนระหว่างตรวจ');
+   const issued=saved.signatures.find(s=>s[0]===id);
+   if(saved.stage==='not'&&(issued[6]||0)!==(x.r.fields['เวลาขอส่งให้นอตซ้ำ']||0))throw Error('มีการส่งการ์ดใหม่แล้ว กรุณาใช้การ์ดล่าสุด');
    const f=x.r.fields;const checked=textOf(f['ข้อมูลที่นอตตรวจผ่าน']);
    if(saved.stage==='may'&&checked&&checked!==expected)throw Error('ข้อมูลต่างจากที่นอตตรวจ ต้องตรวจใหม่');
    const fields=v.action==='return'?{'ส่งกลับแก้ไขก่อนอนุมัติ':true,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','บัญชีตรวจผ่าน':false,'ข้อมูลที่บัญชีตรวจผ่าน':''}:

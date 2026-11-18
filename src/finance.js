@@ -54,7 +54,7 @@ export async function checkedStage(r,j){
 }
 export async function api(env,path,method='GET',body){
  for(let attempt=0;;attempt++){
-  const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+  const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,signal:AbortSignal.timeout(45000),headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
   const result=await response.json();
   if(response.ok&&result.code===0)return result.data;
   const e=Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));e.code=result.code;e.status=response.status;

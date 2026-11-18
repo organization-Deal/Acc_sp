@@ -105,12 +105,12 @@ async function eRender(saved,all){
 }
 function eTransferCard(saved,rows,env){const portal=(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-transfers&k='+encodeURIComponent(saved.nonce);return eCard('คู่ค้า / DEALPAY • รอนอตโอน',[ePara('บัญชีเช็ก นอตตรวจ และเมย์อนุมัติแล้ว\nตรวจบริษัทผู้จ่ายให้ตรงก่อนโอน • หลังโอนแนบสลิปเพื่อปิดรายการ'),...rows.flatMap(x=>[ePara(eDescription(x)+'\n[เปิด PDF อนุมัติแล้ว]('+eDocumentUrl(x,saved.nonce,'approved',env)+')'),...(x.r.fields['หลักฐานการโอน']?.length?[ePara('⚠️ มีหลักฐานโอนอยู่แล้ว ตรวจสอบก่อนโอนซ้ำ')]:[])]),{tag:'action',actions:[{...eButton('เปิดรายการรอโอน / แนบสลิป',null,portal),type:'primary'}]}],'green');}
 async function eReceipt(owner,saved,all){
- if(saved.stage!=='not'||!saved.message||!saved.sentAt)return;
+ if(!['not','may'].includes(saved.stage)||!saved.message||!saved.sentAt)return;
  for(const sig of saved.signatures){const x=all.find(r=>r.id===sig.id);if(!x||x.audit?.epoch!==sig.epoch||await externalFingerprint(x)!==sig.fingerprint)continue;
-  if(x.audit.delivery?.not?.message===saved.message)continue;
-  x.audit.delivery={...x.audit.delivery,not:{message:saved.message,at:saved.sentAt}};
+  if(x.audit.delivery?.[saved.stage]?.message===saved.message)continue;
+  x.audit.delivery={...x.audit.delivery,[saved.stage]:{message:saved.message,at:saved.sentAt}};
   const at=new Date(saved.sentAt).toLocaleString('en-GB',{timeZone:'Asia/Bangkok',hour12:false});
-  await eWrite(owner.env,x,{[EF.audit]:JSON.stringify(x.audit),[EF.delivery]:'ส่งแล้ว • '+at});
+  await eWrite(owner.env,x,{[EF.audit]:JSON.stringify(x.audit),...(saved.stage==='not'?{[EF.delivery]:'ส่งแล้ว • '+at}:{})});
  }
 }
 export async function externalTick(owner){

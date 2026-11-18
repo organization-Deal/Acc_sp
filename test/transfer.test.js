@@ -2,6 +2,19 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {slipFits,transferPage,portalAction} from '../src/transfer.js';
+import {matchOCR} from '../src/match.js';
+test('OCR retries only a missing transaction ID without replacing the payment fields',async()=>{
+ const real=globalThis.fetch;let calls=0;
+ const payment={amount:40,currency:'THB',ref:null,recipient_acct_mask:'xxx-x-x9079-x',sender_name:'OMNI DASH PAY WALLET CO.,LTD.',recipient_bank:'Krung Thai Bank'};
+ globalThis.fetch=async(url,options)=>{
+  calls++;const request=JSON.parse(options.body);
+  assert.match(request.messages[0].content[1].text,/Transaction ID/);
+  assert.equal(request.messages[0].content[0].source.data,'/9j/AA==');
+  return new Response(JSON.stringify({content:[{text:JSON.stringify(calls%2?payment:{ref:'TRTS261119186612198',amount:999})}]}));
+ };
+ try{const o=await matchOCR({CLAUDE_KEY:'test'},'/9j/AA==','image/jpeg');assert.deepEqual(o,{...payment,ref:'TRTS261119186612198'});assert.equal(calls,2);}
+ finally{globalThis.fetch=real;}
+});
 test('slip requires exact amount, currency and recipient account',()=>{
  const r={account:'821-421423-7',amount:231,currency:'THB'};
  assert.equal(slipFits({amount:231,currency:'THB',recipient_acct:'4237'},r),true);

@@ -1,4 +1,4 @@
-import {ED,documentReady,ensureExternalDocument,readExternalDocument} from './external-documents.js';
+import {ED,documentReady,documentCurrent,ensureExternalDocument,readExternalDocument} from './external-documents.js';
 // Partner payments and per-customer refunds. This module never transfers money or creates PEAK documents.
 import {api,recordsPath,people,textOf,digest,verifiedCallback} from './finance.js';
 import {CFG} from './config.js';
@@ -126,9 +126,9 @@ export async function externalTick(owner){
    if(problem)status='รอข้อมูล: '+problem;
    else {try{
     const hash=await externalFingerprint(x);
-    if(!await documentReady(x,'request',hash)&&documentBudget>0){documentBudget--;x=all[i]=await ensureExternalDocument(owner,x,'request',services);}
+    if(!await documentCurrent(x,'request',hash)&&documentBudget>0){documentBudget--;x=all[i]=await ensureExternalDocument(owner,x,'request',services);}
     if(x.audit?.fingerprint===hash&&x.audit?.not?.actor&&x.audit?.may?.actor){
-     const stage=x.audit.paid?'paid':'approved';if(!await documentReady(x,stage,hash)&&documentBudget>0){documentBudget--;x=all[i]=await ensureExternalDocument(owner,x,stage,services);}
+     const stage=x.audit.paid?'paid':'approved';if(!await documentCurrent(x,stage,hash)&&documentBudget>0){documentBudget--;x=all[i]=await ensureExternalDocument(owner,x,stage,services);}
     }
    }catch(e){status='สร้าง PDF ไม่สำเร็จ: '+String(e.message).slice(0,180);console.log('EXTERNAL_DOCUMENT_ERROR',x.id,String(e.message));}}
    if(status&&textOf(x.r.fields[ED.status])!==status)await eWrite(owner.env,x,{[ED.status]:status});

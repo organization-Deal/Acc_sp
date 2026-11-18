@@ -30,3 +30,55 @@ test('commit attaches evidence before completion, rejects wrong company and retr
  assert.equal((await call('PSH')).results[0].already,true);assert.equal(writes.length,2);
  }finally{globalThis.fetch=realFetch;}
 });
+
+import {accountFits,bankCode,payerCompany,slipChoices,resumeDrafts,rereadDraft} from '../src/transfer.js';
+test('masked account matching preserves every visible position including a hidden last digit',()=>{
+ assert.equal(accountFits('xxx-x-x1234-x','111-2-31234-5'),true);
+ assert.equal(accountFits('xxx-x-x1234-x','111-2-30123-4'),false);
+ assert.equal(accountFits('xxx-x-x0234-x','111-2-30234-5'),true);
+ assert.equal(accountFits('xxx-x-x1234-x','11123123456'),false);
+ assert.equal(accountFits('xxx-x-x123-x','1112312345'),false);
+ assert.equal(accountFits('xxxxxx1234','1112301234'),true);
+ assert.equal(accountFits('1112312345','1112312345'),true);
+ assert.equal(accountFits('1234','1112312345'),false);
+ assert.equal(accountFits('masked 1234','1112301234'),false);
+ assert.equal(accountFits('***-*-*1234-*','1112312345'),true);
+});
+test('both server matchers and browser helper require payer, amount, currency and bank agreement',async()=>{
+ const {externalSlipFits}=await import('../src/external-finance.js');
+ const o={amount:40,currency:'THB',recipient_acct_mask:'xxx-x-x1234-x',recipient_bank:'Siam Commercial Bank',sender_name:'OMNI DASH PAY WALLET CO.,LTD.'};
+ const r={account:'1112312345',amount:40,currency:'THB',bank:'ไทยพาณิชย์ (SCB)',company_id:'ODP',company:{id:'ODP'}};
+ assert.equal(slipFits(o,r),true);assert.equal(externalSlipFits(o,r),true);
+ const sandbox={};vm.createContext(sandbox);vm.runInContext([accountFits,bankCode,payerCompany,slipFits,slipChoices].map(f=>f.toString()).join('\n'),sandbox);
+ assert.equal(sandbox.slipFits(o,r),true);
+ for(const change of [{bank:'KBANK'},{company_id:'PWA',company:{id:'PWA'}},{amount:41},{currency:'USD'},{account:'1112301234'}]){
+  assert.equal(slipFits(o,{...r,...change}),false);assert.equal(externalSlipFits(o,{...r,...change}),false);assert.equal(sandbox.slipFits(o,{...r,...change}),false);
+ }
+ assert.equal(bankCode('Krung Thai Bank'),bankCode('ธนาคารกรุงไทย (BT)'));
+ assert.equal(slipFits({...o,amount:null},{...r,amount:0}),false);
+ assert.equal(slipChoices(o,[{...r,id:'a'},{...r,id:'b'}],'ODP').length,2); // ambiguity remains for the user
+ assert.equal(slipChoices(o,[{...r,hasSlip:true}],'ODP').length,0);
+});
+test('resume only returns own recent unpaid drafts and deduplicates legacy mirrors',async()=>{
+ const at=Date.now(),d={id:'a',owner:'not',at,hash:'a',refKey:'ra'};
+ const mem=new Map([['draft:a',d],['external:draft:a',d],['draft:other',{...d,id:'other',owner:'someone',hash:'b',refKey:'rb'}],['draft:old',{...d,id:'old',at:at-7200001,refKey:'rc'}],['draft:paid',{...d,id:'paid',hash:'paid',refKey:'rd'}],['paidHash:paid',{id:'r'}]]);
+ const owner={ctx:{storage:{get:async k=>mem.get(k),list:async({prefix})=>new Map([...mem].filter(([k])=>k.startsWith(prefix)))}}};
+ assert.deepEqual((await resumeDrafts(owner,{recipient:'not'})).map(d=>d.id),['a']);
+});
+test('reread recovers masked OCR from the saved image without uploading or changing payment state',async()=>{
+ const d={id:'d',owner:'not',at:Date.now(),hash:'h',refKey:'ref',ref:'TRX123',file:'saved-image',ocr:{recipient_acct:'1234'}};
+ const mem=new Map([['draft:d',structuredClone(d)]]),real=globalThis.fetch;let ocrCalls=0;
+ const owner={env:{KV:{get:async()=> 'fake-token'},CLAUDE_KEY:'test'},ctx:{storage:{get:async k=>structuredClone(mem.get(k)),put:async(k,v)=>mem.set(k,structuredClone(v))}}};
+ globalThis.fetch=async(url,opt)=>{
+  if(url.includes('/medias/saved-image/download'))return new Response(new Uint8Array([255,216,255,0]));
+  assert.equal(url,'https://api.anthropic.com/v1/messages');ocrCalls++;
+  const body=JSON.parse(opt.body);assert.match(body.messages[0].content[1].text,/ห้ามลบ/);
+  return new Response(JSON.stringify({content:[{text:JSON.stringify({amount:40,currency:'THB',recipient_acct:'xxx-x-x1234-x',recipient_acct_mask:'xxx-x-x1234-x',ref:'TRX123',sender_name:'OMNI DASH PAY WALLET CO.,LTD.',recipient_bank:'SCB'})}]}));
+ };
+ try{
+  await assert.rejects(()=>rereadDraft(owner,'d',{recipient:'other'}),/หมดอายุ/);assert.equal(ocrCalls,0);
+  const r=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(r.draft.ocrVersion,2);assert.equal(r.draft.ocr.recipient_acct_mask,'xxx-x-x1234-x');assert.match(r.preview,/^data:image\/jpeg;base64,/);
+  await rereadDraft(owner,'d',{recipient:'not'});assert.equal(ocrCalls,1);assert.equal([...mem.keys()].some(k=>k.startsWith('paid')),false);
+  mem.set('draft:d',{...d,ref:'DIFFERENT'});await assert.rejects(()=>rereadDraft(owner,'d',{recipient:'not'}),/เลขอ้างอิง/);assert.equal(mem.get('draft:d').ocrVersion,undefined);
+ }finally{globalThis.fetch=real;}
+});

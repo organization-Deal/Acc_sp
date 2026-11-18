@@ -110,7 +110,7 @@ export async function uploadToBitable(env, messageId, imageKey) {
 // ── โหลดรูปกลับมาแสดง (สำหรับรูปที่ upload จากหน้าเว็บตรงๆ ไม่ได้มาจากแชท Lark) ──
 export async function downloadMediaByToken(env, fileToken) {
   const res = await fetch(`${CFG.LARK_HOST}/open-apis/drive/v1/medias/${fileToken}/download`,
-    { headers: { Authorization: 'Bearer ' + (await larkToken(env)) } });
+    { signal:AbortSignal.timeout(45000), headers: { Authorization: 'Bearer ' + (await larkToken(env)) } });
   if (res.status !== 200) throw new Error('media download ' + res.status);
   return await res.arrayBuffer();
 }

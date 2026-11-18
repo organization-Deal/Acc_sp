@@ -1,5 +1,5 @@
 import {api,recordsPath,textOf,digest} from './finance.js';
-import {larkToken,downloadMediaByToken} from './lark.js';
+import {larkToken} from './lark.js';
 import {CFG} from './config.js';
 import {renderExternalPdf} from './external-pdf.js';
 
@@ -49,5 +49,11 @@ export async function ensureExternalDocument(owner,x,stage,services){
 }
 export async function readExternalDocument(owner,saved,x,stage,hash){
  if(!saved||!['request','approved','paid'].includes(stage)||!(saved.signatures.some(s=>s.id===x.id&&s.fingerprint===hash&&s.epoch===x.audit?.epoch)||(saved.stage==='transfer'&&stage==='approved'&&x.audit?.stage==='transfer'&&x.audit.fingerprint===hash))||!await documentReady(x,stage,hash))throw Error('ไม่มีสิทธิ์หรือเอกสารเปลี่ยน');
- const meta=documentMeta(x),bytes=await downloadMediaByToken(owner.env,meta[stage].file);return {bytes,filename:meta.number+'-'+stage+'.pdf'};
+ const meta=documentMeta(x);owner.documentFieldIds=owner.documentFieldIds||{};
+ if(!owner.documentFieldIds[x.table]){const fields=await api(owner.env,recordsPath(x.table).replace(/\/records$/,'/fields')+'?page_size=100');owner.documentFieldIds[x.table]=Object.fromEntries(fields.items.filter(f=>f.type===17).map(f=>[f.field_name,f.field_id]));}
+ const field=owner.documentFieldIds[x.table][ED[stage]];if(!field)throw Error('ไม่พบช่องเอกสาร');
+ const extra={bitablePerm:{tableId:x.table,attachments:{[field]:{[x.r.record_id]:[meta[stage].file]}}}};
+ const response=await fetch(CFG.LARK_HOST+'/open-apis/drive/v1/medias/'+encodeURIComponent(meta[stage].file)+'/download?extra='+encodeURIComponent(JSON.stringify(extra)),{headers:{Authorization:'Bearer '+await larkToken(owner.env)}});
+ if(!response.ok)throw Error('เปิด PDF ไม่สำเร็จ ('+response.status+')');const bytes=await response.arrayBuffer();
+ if(new TextDecoder().decode(bytes.slice(0,5))!=='%PDF-')throw Error('ไฟล์ตอบกลับไม่ใช่ PDF');return {bytes,filename:meta.number+'-'+stage+'.pdf'};
 }

@@ -66,9 +66,9 @@ test('resume only returns own recent unpaid drafts and deduplicates legacy mirro
  assert.deepEqual((await resumeDrafts(owner,{recipient:'not'})).map(d=>d.id),['a']);
 });
 test('reread recovers masked OCR from the saved image without uploading or changing payment state',async()=>{
- const d={id:'d',owner:'not',at:Date.now(),hash:'h',refKey:'ref',ref:'TRX123',file:'saved-image',ocr:{recipient_acct:'1234'}};
+ const d={id:'d',owner:'not',at:Date.now(),hash:await (await import('../src/finance.js')).digest('/9j/AA=='),refKey:'ref',ref:'TRX123',file:'saved-image',ocr:{recipient_acct:'1234'}};
  const mem=new Map([['draft:d',structuredClone(d)]]),real=globalThis.fetch;let ocrCalls=0;
- const owner={env:{KV:{get:async()=> 'fake-token'},CLAUDE_KEY:'test'},ctx:{storage:{get:async k=>structuredClone(mem.get(k)),put:async(k,v)=>mem.set(k,structuredClone(v))}}};
+ const owner={env:{KV:{get:async k=>k.startsWith('transfer-image:')?'/9j/AA==':'fake-token',put:async()=>{}},CLAUDE_KEY:'test'},ctx:{storage:{get:async k=>structuredClone(mem.get(k)),put:async(k,v)=>mem.set(k,structuredClone(v))}}};
  globalThis.fetch=async(url,opt)=>{
   if(url.includes('/medias/saved-image/download'))return new Response(new Uint8Array([255,216,255,0]));
   assert.equal(url,'https://api.anthropic.com/v1/messages');ocrCalls++;
@@ -79,6 +79,10 @@ test('reread recovers masked OCR from the saved image without uploading or chang
   await assert.rejects(()=>rereadDraft(owner,'d',{recipient:'other'}),/หมดอายุ/);assert.equal(ocrCalls,0);
   const r=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(r.draft.ocrVersion,2);assert.equal(r.draft.ocr.recipient_acct_mask,'xxx-x-x1234-x');assert.match(r.preview,/^data:image\/jpeg;base64,/);
   await rereadDraft(owner,'d',{recipient:'not'});assert.equal(ocrCalls,1);assert.equal([...mem.keys()].some(k=>k.startsWith('paid')),false);
-  mem.set('draft:d',{...d,ref:'DIFFERENT'});await assert.rejects(()=>rereadDraft(owner,'d',{recipient:'not'}),/เลขอ้างอิง/);assert.equal(mem.get('draft:d').ocrVersion,undefined);
+  mem.set('draft:d',{...d,ref:'DIFFERENT'});mem.set('ref',{id:'already-reserved'});await assert.rejects(()=>rereadDraft(owner,'d',{recipient:'not'}),/เลขอ้างอิง/);assert.equal(mem.get('draft:d').ocrVersion,undefined);
+  mem.delete('ref');const corrected=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(corrected.draft.ref,'TRX123');assert.equal(corrected.draft.originalOcrRef,'DIFFERENT');
+  const cached={...d,ref:'TRX123'};mem.set('draftHash:'+d.hash,cached);
+  const reused=await portalAction(owner,{op:'prepare',image:'/9j/AA==',mime:'image/jpeg',filename:'original.jpg'},{stage:'transfer',recipient:'not'});
+  assert.equal(reused.draft.id,'d');assert.equal(reused.draft.ocrVersion,2);assert.equal(reused.draft.file,'saved-image');
  }finally{globalThis.fetch=real;}
 });

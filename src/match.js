@@ -91,10 +91,11 @@ export async function matchOCR(env, base64, mime){
   const key=env.CLAUDE_KEY||env.ANTHROPIC_API_KEY;
   const mt=/png|jpe?g|webp|gif/i.test(mime||'') ? String(mime).toLowerCase().replace('image/jpg','image/jpeg') : 'image/jpeg';
   const prompt=`อ่านสลิปโอนเงินธนาคารไทย ตอบ JSON เท่านั้น:
-{"amount":เลข|null,"currency":"THB|USD","recipient_name":"ชื่อผู้รับ|null","recipient_acct":"เลขบัญชีผู้รับเป็นตัวเลขล้วนเท่าที่เห็น|null","ref":"เลขอ้างอิง|null"}`;
+{"amount":เลข|null,"currency":"THB|USD","recipient_name":"ชื่อผู้รับ|null","recipient_acct":"เลขบัญชีผู้รับตามภาพ เก็บ x และขีดทุกตำแหน่ง|null","recipient_acct_mask":"เลขบัญชีผู้รับตามภาพ ห้ามลบหรือเติมตัวเลข/x|null","recipient_bank":"ชื่อธนาคารผู้รับ|null","sender_name":"ชื่อผู้โอนฝั่ง From ทั้งไทยและอังกฤษ|null","sender_acct":"เลขบัญชีผู้โอนตามภาพ|null","ref":"เลขอ้างอิง|null"}
+ห้ามเดาตัวเลขที่ซ่อน สลิป K BIZ เช่น xxx-x-x9079-x ให้คงเป็น xxx-x-x9079-x ไม่ใช่ 9079 เพราะตัวสุดท้ายก็ถูกซ่อน ชื่อธนาคารผู้รับอ่านจากฝั่ง To ไม่ใช่โลโก้หัวกระดาษหรือฝั่ง From ชื่อบริษัทผู้โอนอ่านจากฝั่ง From เท่านั้น ถ้าอ่านไม่ได้ให้ null ยอดใช้จำนวนเงินโอน ไม่รวมค่าธรรมเนียม`;
   const res=await fetch('https://api.anthropic.com/v1/messages',{method:'POST',
     headers:{'x-api-key':key,'anthropic-version':CFG.CLAUDE_VERSION,'Content-Type':'application/json'},
-    body:JSON.stringify({model:CFG.CLAUDE_MODEL,max_tokens:600,messages:[
+    body:JSON.stringify({model:CFG.CLAUDE_MODEL,max_tokens:1000,messages:[
       {role:'user',content:[{type:'image',source:{type:'base64',media_type:mt,data:base64}},{type:'text',text:prompt}]},
       {role:'assistant',content:'{'}]})});
   const raw=await res.text(); let body;

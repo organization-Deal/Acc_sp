@@ -53,14 +53,26 @@ async function retainDraftImage(owner,d,image,mime){
 export async function upgradeDraft(owner,d,image,mime){
  if(await digest(image)!==d.hash)throw Error('ภาพสลิปไม่ตรงกับไฟล์เดิม');
  if(await owner.ctx.storage.get('paidHash:'+d.hash))throw Error('สลิปนี้แนบสำเร็จแล้ว');
- const o=await matchOCR(owner.env,image,mime),ref=String(o.ref||'').replace(/\s/g,'');
+ const o=await matchOCR(owner.env,image,mime),ref=String(d.referenceReviewedAt?d.ref:o.ref||'').replace(/\s/g,'');
  if(!/^[A-Za-z0-9_-]{6,80}$/.test(ref)||/^(null|none)$/i.test(ref))throw Error('อ่านเลขที่รายการ / Transaction ID ไม่ได้ กรุณาใช้ภาพที่เห็นเลขด้านบนชัดเจน');
  if(ref!==d.ref){
   const newKey='paidRef:'+await digest(ref);
   if(await owner.ctx.storage.get(d.refKey)||await owner.ctx.storage.get(newKey))throw Error('เลขอ้างอิงสลิปถูกใช้งานแล้ว กรุณาตรวจรายการเดิม');
   d.originalOcrRef=d.ref;d.ref=ref;d.refKey=newKey;
  }
+ if(d.referenceReviewedAt)o.ref=ref;
  d.ocr=o;d.ocrVersion=2;await retainDraftImage(owner,d,image,mime);await saveDraft(owner,d);return d;
+}
+export async function reviewDraftReference(owner,id,value,saved){
+ const d=await owner.ctx.storage.get('draft:'+id)||await owner.ctx.storage.get('external:draft:'+id);
+ if(!d||d.owner!==saved.recipient||Date.now()-d.at>2*3600000)throw Error('สลิปหมดอายุ กรุณาอ่านใหม่');
+ const ref=String(value||'').trim().replace(/\s/g,'');
+ if(!/^[A-Za-z0-9_-]{6,80}$/.test(ref)||/^(null|none)$/i.test(ref))throw Error('กรอกเลขที่รายการตามสลิปให้ครบ');
+ const key='paidRef:'+await digest(ref);
+ if(await owner.ctx.storage.get('paidHash:'+d.hash)||await owner.ctx.storage.get(d.refKey)||await owner.ctx.storage.get(key))throw Error('สลิปหรือเลขอ้างอิงถูกใช้แล้ว กรุณาตรวจรายการเดิม');
+ d.referenceHistory=[...(d.referenceHistory||[]),{from:d.ref,to:ref,by:saved.recipient,at:Date.now()}];
+ d.originalOcrRef??=d.ref;d.ref=ref;d.refKey=key;d.referenceReviewedAt=Date.now();d.ocr={...d.ocr,ref};
+ await saveDraft(owner,d);return {ok:true,draft:d};
 }
 export async function rereadDraft(owner,id,saved){
  const d=await owner.ctx.storage.get('draft:'+id)||await owner.ctx.storage.get('external:draft:'+id);
@@ -89,6 +101,7 @@ export async function portalAction(owner,b,session){
  if(test)throw Error('TEST ดูและคัดลอกตัวอย่างได้ แต่ไม่รับสลิปจริงและไม่เปลี่ยนสถานะจ่าย');
  if(b.op==='resume')return {ok:true,drafts:await resumeDrafts(owner,saved)};
  if(b.op==='reread')return rereadDraft(owner,b.draft,saved);
+ if(b.op==='reference')return reviewDraftReference(owner,b.draft,b.ref,saved);
  if(b.op==='prepare'){
   if(!['image/jpeg','image/png','image/webp'].includes(b.mime)||typeof b.image!=='string'||b.image.length>9*1024*1024)throw Error('รับ JPG/PNG/WebP ไม่เกิน 6 MB ต่อใบ');
   const bin=atob(b.image),bytes=Uint8Array.from(bin,c=>c.charCodeAt(0)),hash=await digest(b.image);
@@ -159,6 +172,8 @@ function renderSlips(){
   const box=el.lastChild;
   if(s.draft&&!s.error){const detail=document.createElement('p');detail.className='muted';detail.textContent='ธนาคารผู้รับ: '+(s.draft.ocr.recipient_bank||'อ่านไม่ได้')+' • เลขที่รายการ: '+s.draft.ref;box.append(detail);}
   if(s.draft&&!s.done){
+   const refInput=document.createElement('input');refInput.setAttribute('aria-label','เลขที่รายการตามสลิป');refInput.value=s.draft.ref||'';refInput.disabled=busy;box.append(refInput);
+   const refSave=document.createElement('button');refSave.textContent='บันทึกเลขที่รายการที่ตรวจแล้ว';refSave.disabled=busy;refSave.onclick=async()=>{const value=refInput.value;busy=true;renderSlips();try{const j=await api('reference',{draft:s.draft.id,ref:value});s.draft=j.draft;if(s.draft.ocrVersion===2)s.error='';}catch(e){s.error=e.message;}busy=false;renderSlips();};box.append(refSave);
    const o=s.draft.ocr,detected=payerCompany(o),all=slipChoices(o,rows,'');
    if(!s.company&&!s.manualCompany)s.company=detected||(all.length===1?all[0].company_id:'');
    const cs=document.createElement('select');cs.setAttribute('aria-label','บริษัทผู้จ่าย');

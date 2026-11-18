@@ -48,7 +48,8 @@ test('table review consumes one request, routes to Not and preserves review on r
  }finally{globalThis.fetch=realFetch;}
 });
 
-import {financeTick,financeCallback,SUMMARY,LEDGER} from '../src/finance.js';
+
+import {financeTick,financeCallback,SUMMARY,LEDGER,recordNotDelivery,DELIVERY_AT,DELIVERY_STATUS,DELIVERY_ID} from '../src/finance.js';
 import {CFG} from '../src/config.js';
 test('five sequential approvals survive polls and only remaining buttons stay; duplicate and changed data are safe',async()=>{
  const rows=[];for(let i=0;i<5;i++){
@@ -63,7 +64,7 @@ test('five sequential approvals survive polls and only remaining buttons stay; d
   if(path.includes('/im/v1/messages')){if(opt.method==='POST'){const id='m'+(++n);cards.set(id,JSON.parse(body.content));data.message_id=id;}else cards.set(path.split('/').pop(),JSON.parse(body.content));}
   else if(path.includes(CFG.T_EMPLOYEE))data.items=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
   else if(path.includes(LEDGER))data.items=rows.map(x=>({fields:{'ข้อมูลงาน JSON':JSON.stringify(x.j)}}));
-  else if(path.includes(SUMMARY)){const row=rows.find(x=>path.endsWith('/'+x.r.record_id));if(row){if(opt.method==='PUT'){writes.push(row.r.record_id);Object.assign(row.r.fields,body.fields);}data.record=structuredClone(row.r);}else data.items=rows.map(x=>structuredClone(x.r));}
+  else if(path.includes(SUMMARY)){if(path.endsWith('/batch_update')){for(const u of body.records)Object.assign(rows.find(x=>x.r.record_id===u.record_id).r.fields,u.fields);data.records=body.records;}else{const row=rows.find(x=>path.endsWith('/'+x.r.record_id));if(row){if(opt.method==='PUT'){writes.push(row.r.record_id);Object.assign(row.r.fields,body.fields);}data.record=structuredClone(row.r);}else data.items=rows.map(x=>structuredClone(x.r));}}
   else throw Error('Unexpected URL '+path);
   return new Response(JSON.stringify({code:0,data}));
  };
@@ -83,5 +84,17 @@ test('five sequential approvals survive polls and only remaining buttons stay; d
   const may=db.get(db.get('active:may')[0]);rows[0].r.fields['ยอดรวม']=99;
   const bad=callback('r0');bad.event.operator.open_id='ou_may';bad.event.action.value.nonce=may.nonce;
   await financeCallback(owner,bad);assert.equal(writes.length,5);assert.equal(rows[0].r.fields.Approve,undefined);
+ }finally{globalThis.fetch=real;}
+});
+test('delivery receipt needs message acknowledgement and retries audit without resending; old timestamp comes from message',async()=>{
+ const x={r:{record_id:'r',fields:{'เวลาบัญชีตรวจผ่าน':10}},j:{key:'k'}};const hash=await fingerprint(x.r,x.j),writes=[];let fail=false,reads=0;
+ const owner={env:{KV:{get:async()=> 'token'}},ctx:{storage:{put:async()=>{}}}},saved={stage:'not',signatures:[['r',hash,'',[],10]]};
+ const real=globalThis.fetch;globalThis.fetch=async(url,opt)=>{if(opt.method==='GET'){reads++;return new Response(JSON.stringify({code:0,data:{items:[{message_id:'om_test',create_time:'1795011000000'}]}}));}if(fail)throw Error('temporary audit failure');const b=JSON.parse(opt.body);writes.push(b);return new Response(JSON.stringify({code:0,data:{records:b.records}}));};
+ try{
+  await recordNotDelivery(owner,'k',saved,[x]);assert.equal(writes.length,0);
+  Object.assign(saved,{sent:true,message:'om_test'});fail=true;await assert.rejects(()=>recordNotDelivery(owner,'k',saved,[x]));assert.equal(x.r.fields[DELIVERY_STATUS],undefined);
+  fail=false;await recordNotDelivery(owner,'k',saved,[x]);assert.equal(reads,1);assert.equal(x.r.fields[DELIVERY_STATUS],'ส่งแล้ว');assert.equal(x.r.fields[DELIVERY_AT],1795011000000);assert.equal(x.r.fields[DELIVERY_ID],'om_test');
+  await recordNotDelivery(owner,'k',saved,[x]);assert.equal(writes.length,1);
+  x.r.fields['เวลาบัญชีตรวจผ่าน']=20;saved.sentAt+=1000;await recordNotDelivery(owner,'k',saved,[x]);assert.equal(writes.length,1);
  }finally{globalThis.fetch=real;}
 });

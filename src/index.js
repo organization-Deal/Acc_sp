@@ -1,4 +1,4 @@
-import {externalTick,externalCallback,externalPortalAuth,externalPortalAction,externalTransferPage,EXTERNAL_FLOW_VERSION} from './external-finance.js';
+import {externalTick,externalCallback,externalDocumentAccess,externalPortalAuth,externalPortalAction,externalTransferPage,EXTERNAL_FLOW_VERSION} from './external-finance.js';
 import {portalAction,portalAuth,transferPage} from './transfer.js';
 import {financeTick,financeCallback,verifiedCallback} from './finance.js';
 import {validateBills} from './validation.js';
@@ -62,6 +62,7 @@ async function handleGet(request, env, ctx) {
   const url = new URL(request.url);
   const p = Object.fromEntries(url.searchParams);
   const act = p.act || '';
+  if(act==='external-document'){try{const d=await doStub(env,'finance-coordinator-v1').externalDocumentAccess(p);return new Response(d.bytes,{headers:{'Content-Type':'application/pdf','Content-Disposition':'inline; filename="'+d.filename+'"','Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'}});}catch{return new Response('ไม่มีสิทธิ์ เอกสารเปลี่ยน หรือลิงก์หมดอายุ ให้เปิดการ์ดล่าสุด',{status:403});}}
   if(act==='external-transfers'){try{await doStub(env,'finance-coordinator-v1').externalTransferAccess(p.k);return new Response(externalTransferPage(p.k),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}catch{return new Response('ลิงก์หมดอายุ เปิดการ์ดรอโอนล่าสุด',{status:403});}}
   if(act==='transfers'){try{await doStub(env,'finance-coordinator-v1').transferAccess(p.k);return new Response(transferPage(p.k),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}catch{return new Response('ลิงก์หมดอายุ เปิดการ์ดล่าสุดในผู้ช่วยบัญชี',{status:403});}}
   if (!act) return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v2', externalFlow:EXTERNAL_FLOW_VERSION, note: 'ส่งบิลในแชท Lark' });
@@ -236,6 +237,7 @@ export class SessionDO extends DurableObject {
     this.financeSerial=run.catch(()=>{});return run;
   }
   async externalDecide(body){const run=(this.financeSerial||Promise.resolve()).then(async()=>{const r=await externalCallback(this,body);await externalTick(this);return r;});this.financeSerial=run.catch(()=>{});return run;}
+  async externalDocumentAccess(b){return externalDocumentAccess(this,b);}
   async externalTransferAccess(k){await externalPortalAuth(this,k);return true;}
   async externalTransferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>externalPortalAction(this,b));this.financeSerial=run.catch(()=>{});return run;}
 

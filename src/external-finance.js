@@ -103,7 +103,48 @@ async function eRender(saved,all){
  if(pending>1)elements.push({tag:'action',actions:[{...eButton((saved.stage==='not'?'ตรวจผ่าน':'อนุมัติ')+'ที่เหลือ '+pending+' รายการ',{externalFinance:true,nonce:saved.nonce,action:'accept-all'}),type:'primary',confirm:{title:ePlain('ยืนยัน '+pending+' รายการ'),text:ePlain('ตรวจเอกสาร บริษัท ยอด และบัญชีผู้รับครบแล้ว')}}]});
  return {card:eCard(saved.stage==='not'?'คู่ค้า / DEALPAY • รอนอตตรวจ':'คู่ค้า / DEALPAY • รอเมย์อนุมัติ',elements,saved.stage==='not'?'blue':'purple'),pending};
 }
-function eTransferCard(saved,rows,env){const portal=(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-transfers&k='+encodeURIComponent(saved.nonce);return eCard('คู่ค้า / DEALPAY • รอนอตโอน',[ePara('บัญชีเช็ก นอตตรวจ และเมย์อนุมัติแล้ว\nตรวจบริษัทผู้จ่ายให้ตรงก่อนโอน • หลังโอนแนบสลิปเพื่อปิดรายการ'),...rows.flatMap(x=>[ePara(eDescription(x)+'\n[เปิด PDF อนุมัติแล้ว]('+eDocumentUrl(x,saved.nonce,'approved',env)+')'),...(x.r.fields['หลักฐานการโอน']?.length?[ePara('⚠️ มีหลักฐานโอนอยู่แล้ว ตรวจสอบก่อนโอนซ้ำ')]:[])]),{tag:'action',actions:[{...eButton('เปิดรายการรอโอน / แนบสลิป',null,portal),type:'primary'}]}],'green');}
+const eTransferUrl=(saved,env)=>(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-transfers&k='+encodeURIComponent(saved.nonce);
+export function externalTransferCard(saved,rows,env){
+ const total=rows.reduce((s,x)=>s+Math.round(x.amount*100),0)/100,groups=new Map();
+ for(const x of rows){if(!groups.has(x.company.id))groups.set(x.company.id,[]);groups.get(x.company.id).push(x);}
+ const elements=[ePara('**รอโอน '+rows.length+' รายการ • รวม '+eMoney(total)+' THB**\nคู่ค้า '+rows.filter(x=>x.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(x=>x.kind==='dealpay').length+' รายการ'),ePara(rows.length?'เมย์อนุมัติแล้ว • ตรวจบริษัทผู้จ่ายก่อนโอน\nหลังโอนแนบสลิปเพื่อปิดรายการ • การ์ดนี้อัปเดตรายการคงเหลืออัตโนมัติ':'ไม่มีรายการที่อนุมัติแล้วรอโอนในขณะนี้')];
+ for(const group of groups.values())elements.push(ePara('**'+eMd(group[0].company.name)+'**\n'+group.length+' รายการ • '+eMoney(group.reduce((s,x)=>s+Math.round(x.amount*100),0)/100)+' THB'));
+ let shown=0;
+ for(const group of groups.values())for(const x of group){
+  const item=ePara('**'+(shown+1)+'. '+eMd(x.name)+' • '+eMoney(x.amount)+' THB**\n'+x.company.id+' • '+eMd(EXTERNAL_TABLES[x.kind].label)+' • '+eMd(textOf(x.r.fields[ED.number])||x.doc)+'\n'+eMd(x.bank)+' • '+eMd(x.account)+'\n[PDF อนุมัติแล้ว]('+eDocumentUrl(x,saved.nonce,'approved',env)+') | [เปิดรายการ / หลักฐาน]('+eUrl(x)+')'+(x.r.fields['หลักฐานการโอน']?.length?'\n⚠️ มีหลักฐานโอนแล้ว ตรวจสอบก่อนโอนซ้ำ':''));
+  // Keep one card even for a large queue; the portal always contains every current row.
+  if(shown>=20||new TextEncoder().encode(JSON.stringify([...elements,item])).length>23000)continue;
+  elements.push(item);shown++;
+ }
+ if(shown<rows.length)elements.push(ePara('แสดง '+shown+' จาก '+rows.length+' รายการ • เปิดรายการรอโอนทั้งหมดด้านล่าง'));
+ elements.push({tag:'action',actions:[{...eButton('เปิดรายการรอโอนทั้งหมด / แนบสลิป',null,eTransferUrl(saved,env)),type:'primary'}]});
+ return eCard('คู่ค้า / DEALPAY • รอนอตโอน',elements,rows.length?'green':'grey');
+}
+async function eTransferSummary(owner,all,recipient){
+ const store=owner.ctx.storage,rows=[];
+ for(const x of all)if(await externalStage(x)==='transfer')rows.push(x);
+ rows.sort((a,b)=>a.company.id.localeCompare(b.company.id)||a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
+ const pointer=await store.get('external:transfer-summary'),keys=[...new Set([pointer,...await store.get('external:active:transfer')||[]].filter(Boolean))],existing=[];
+ for(const key of keys){const saved=await store.get(key);if(saved)existing.push({key,saved});}
+ const valid=existing.filter(({saved})=>!saved.retired&&saved.stage==='transfer'&&saved.recipient===recipient&&Date.now()-saved.created<7*86400000);
+ let current=valid.find(x=>x.key===pointer)||valid.sort((a,b)=>b.saved.created-a.saved.created)[0],sends=0;
+ if(!current&&rows.length){const nonce=crypto.randomUUID();current={key:'external:card:transfer:summary:'+nonce,saved:{version:1,stage:'transfer',recipient,nonce,created:Date.now()}};}
+ if(current){
+  const {key,saved}=current;saved.summary=true;saved.signatures=await Promise.all(rows.map(async x=>({id:x.id,fingerprint:await externalFingerprint(x),epoch:x.audit.epoch})));
+  // Persist the same nonce before delivery, so a retry cannot create another summary.
+  await store.put(key,saved);await store.put('external:nonce:'+saved.nonce,key);await store.put('external:transfer-summary',key);
+  const card=externalTransferCard(saved,rows,owner.env);
+  if(!saved.message){saved.message=await eSend(owner.env,recipient,card,key);saved.sentAt=Date.now();saved.renderHash=await digest(card);await store.put(key,saved);sends++;}
+  else await ePatch(owner,key,saved,card);
+ }
+ for(const {key,saved} of existing){
+  if(key===current?.key)continue;
+  if(saved.message)await ePatch(owner,key,saved,eCard('รวมรายการรอโอนแล้ว',[ePara('รายการจากการ์ดนี้รวมอยู่ในการ์ดรอนอตโอนล่าสุดแล้ว'+(current&&saved.recipient===recipient?'\n[เปิดรายการรอโอนทั้งหมด]('+eTransferUrl(current.saved,owner.env)+')':''))],'grey'));
+  saved.retired=true;await store.put(key,saved);
+ }
+ await store.put('external:active:transfer',current?[current.key]:[]);
+ return {count:rows.length,sends,cards:current?1:0};
+}
 async function eReceipt(owner,saved,all){
  if(!['not','may'].includes(saved.stage)||!saved.message||!saved.sentAt)return;
  for(const sig of saved.signatures){const x=all.find(r=>r.id===sig.id);if(!x||x.audit?.epoch!==sig.epoch||await externalFingerprint(x)!==sig.fingerprint)continue;
@@ -139,13 +180,12 @@ export async function externalTick(owner){
   if(status&&textOf(x.r.fields[EF.status])!==status)await eWrite(owner.env,x,{[EF.status]:status,...(['changed','blocked'].includes(stage)?{[EF.not]:false,[EF.may]:false}:{})});
  }
  let sends=0;const counts={not:0,may:0,transfer:0};
- for(const stage of ['not','may','transfer']){
+ for(const stage of ['not','may']){
   const recipient=stage==='may'?recipients.may:recipients.not,active=[],covered=new Set();
   for(const key of await owner.ctx.storage.get('external:active:'+stage)||[]){
    const saved=await owner.ctx.storage.get(key);if(!saved?.message)continue;
    let pending;
-   if(stage!=='transfer'){const render=await eRender(saved,all);await ePatch(owner,key,saved,render.card);pending=render.pending;await eReceipt(owner,saved,all);}
-   else {const rows=[];for(const sig of saved.signatures){const x=all.find(r=>r.id===sig.id);if(x&&x.audit?.epoch===sig.epoch&&await externalStage(x)==='transfer'&&await externalFingerprint(x)===sig.fingerprint)rows.push(x);}pending=rows.length;await ePatch(owner,key,saved,pending?eTransferCard(saved,rows,owner.env):eCard('รายการโอนมีการอัปเดต',[ePara('ไม่มีรายการจากการ์ดนี้รอโอนแล้ว ตรวจสถานะล่าสุดในตาราง')],'grey'));}
+   const render=await eRender(saved,all);await ePatch(owner,key,saved,render.card);pending=render.pending;await eReceipt(owner,saved,all);
    if(pending&&saved.recipient===recipient&&Date.now()-saved.created<7*86400000){active.push(key);for(const s of saved.signatures){const x=all.find(r=>r.id===s.id);if(x&&x.audit?.epoch===s.epoch&&await externalFingerprint(x)===s.fingerprint&&await externalStage(x)===stage)covered.add(x.id);}}
    else {saved.retired=true;await owner.ctx.storage.put(key,saved);}
   }
@@ -155,12 +195,13 @@ export async function externalTick(owner){
    const rows=remaining.slice(i,i+5),signatures=await Promise.all(rows.map(async x=>({id:x.id,fingerprint:await externalFingerprint(x),epoch:x.audit.epoch})));
    const key='external:card:'+stage+':'+await digest([signatures,recipient,Math.floor(Date.now()/(7*86400000))]);let saved=await owner.ctx.storage.get(key);
    if(!saved){saved={version:1,stage,recipient,signatures,nonce:crypto.randomUUID(),created:Date.now()};await owner.ctx.storage.put(key,saved);await owner.ctx.storage.put('external:nonce:'+saved.nonce,key);}
-   if(!saved.message){const c=stage==='transfer'?eTransferCard(saved,rows,owner.env):(await eRender(saved,rows)).card;saved.message=await eSend(owner.env,recipient,c,key);saved.sentAt=Date.now();saved.renderHash=await digest(c);await owner.ctx.storage.put(key,saved);sends++;}
+   if(!saved.message){const c=(await eRender(saved,rows)).card;saved.message=await eSend(owner.env,recipient,c,key);saved.sentAt=Date.now();saved.renderHash=await digest(c);await owner.ctx.storage.put(key,saved);sends++;}
    await eReceipt(owner,saved,all);active.push(key);
   }
   await owner.ctx.storage.put('external:active:'+stage,active);
  }
- await owner.ctx.storage.put('external:lastPoll',{at:Date.now(),counts,sends});console.log('EXTERNAL_FINANCE_POLL',JSON.stringify({counts,sends}));return {ok:true,counts,sends};
+ const transfer=await eTransferSummary(owner,all,recipients.not);counts.transfer=transfer.count;sends+=transfer.sends;
+ const transferCards=transfer.cards;await owner.ctx.storage.put('external:lastPoll',{at:Date.now(),counts,sends,transferCards});console.log('EXTERNAL_FINANCE_POLL',JSON.stringify({counts,sends,transferCards}));return {ok:true,counts,sends,transferCards};
 }
 export async function externalCallback(owner,b){
  if(owner.env.FINANCE_ENABLED!=='true'||!verifiedCallback(owner.env,b))throw Error('Unauthorized callback');

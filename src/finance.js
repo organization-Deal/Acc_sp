@@ -54,7 +54,7 @@ export async function checkedStage(r,j){
 }
 export async function api(env,path,method='GET',body){
  const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
- const result=await response.json();if(!response.ok||result.code!==0)throw Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));return result.data;
+ const result=await response.json();if(!response.ok||result.code!==0){const e=Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));e.code=result.code;e.status=response.status;throw e;}return result.data;
 }
 export const recordsPath=table=>'bitable/v1/apps/'+CFG.BASE_TOKEN+'/tables/'+table+'/records';
 async function list(env,table){let rows=[],page='';do{const d=await api(env,recordsPath(table)+'?page_size=500'+(page?'&page_token='+encodeURIComponent(page):''));rows.push(...(d.items||[]));page=d.has_more?d.page_token:'';}while(page);return rows;}
@@ -72,13 +72,13 @@ export async function people(env){
 const plain=content=>({tag:'plain_text',content});
 const paragraph=content=>({tag:'div',text:{tag:'lark_md',content}});
 const button=(label,value,url)=>({tag:'button',text:plain(label),...(url?{url}:{value}),type:'default'});
-const card=(title,elements,template='blue')=>({config:{wide_screen_mode:true},header:{template,title:plain(title)},elements});
+const card=(title,elements,template='blue')=>({config:{wide_screen_mode:true,update_multi:true,enable_forward:false},header:{template,title:plain(title)},elements});
 function rowText(x){const f=x.r.fields;return '**'+md(f['เลขใบขอเบิก'])+' • '+md(x.j.company.name)+'**\n'+md(f['ชื่อพนักงาน'])+' • '+x.j.items.length+' บิล • **'+money(f['ยอดรวม'])+' '+md(x.j.currency)+'**\n[ดู PDF]('+linkOf(f['ใบขอเบิก PDF'])+') | [เปิดรายการ]('+SUMMARY_URL+'&record='+x.r.record_id+')';}
 function reviewCard(stage,rows,nonce){
  const pending=rows.filter(x=>!x.reviewStatus);
  const elements=[paragraph('ตรวจเอกสารก่อนกด • ปุ่มใช้ได้เฉพาะ'+(stage==='accounting'?'ฝ่ายบัญชี':stage==='not'?'นอต':'เมย์')+'\n'+rows.length+' ใบสรุป แยกบริษัท • ไม่ใช่การยืนยันโอนเงิน')];
  elements.push(paragraph('เหลือให้กด '+pending.length+' / '+rows.length+' ใบ'));
- for(const x of rows){elements.push(paragraph(x.j?rowText(x):md(x.r.record_id)));if(x.reviewStatus){elements.push(paragraph(x.reviewStatus));continue;}elements.push({tag:'action',actions:[button(stage==='accounting'?'บัญชีตรวจผ่าน → ส่งให้นอต':stage==='not'?'ตรวจผ่าน → ส่งให้เมย์':'Approve',{finance:true,nonce,action:'accept',id:x.r.record_id}),button('ส่งกลับแก้ไข',{finance:true,nonce,action:'return',id:x.r.record_id})]});}
+ for(const x of rows){elements.push(paragraph(x.j?rowText(x):md(x.r.record_id)));if(x.reviewStatus){elements.push(paragraph(x.reviewStatus));continue;}if(x.reviewError)elements.push(paragraph(x.reviewError));elements.push({tag:'action',actions:[button(stage==='accounting'?'บัญชีตรวจผ่าน → ส่งให้นอต':stage==='not'?'ตรวจผ่าน → ส่งให้เมย์':'Approve',{finance:true,nonce,action:'accept',id:x.r.record_id}),button('ส่งกลับแก้ไข',{finance:true,nonce,action:'return',id:x.r.record_id})]});}
  if(pending.length)elements.push({tag:'action',actions:[{...button(stage==='not'?'ตรวจผ่านที่เหลือ '+pending.length+' ใบ':'Approve ที่เหลือ '+pending.length+' ใบ',{finance:true,nonce,action:'accept-all'}),type:'primary',confirm:{title:plain('ยืนยัน '+pending.length+' ใบสรุป'),text:plain('ตรวจเอกสารและยอดครบทุกบริษัทแล้วใช่ไหม')}}]});
  return card(stage==='accounting'?'รอบัญชีตรวจเอกสาร • ผู้ช่วยบัญชี':stage==='not'?'รอนอตตรวจ • ผู้ช่วยบัญชี':'รอเมย์อนุมัติ • ผู้ช่วยบัญชี',elements,stage==='not'?'blue':'purple');
 }
@@ -110,13 +110,22 @@ export async function reviewRows(saved,all,storage){
   else if(saved.stage==='not'&&f['นอตตรวจผ่าน']===true)x.reviewStatus='✅ นอตตรวจผ่านแล้ว → รอเมย์อนุมัติ';
   else if(done)x.reviewStatus=done.action==='return'?'↩️ ส่งกลับแก้ไขแล้ว':'✅ ทำรายการแล้ว • ตรวจสถานะล่าสุดในตาราง';
   else if(stage!==saved.stage||!epoch)x.reviewStatus='⚠️ สถานะเปลี่ยน ใช้การ์ดล่าสุด';
+  if(!x.reviewStatus&&saved.errors?.[id])x.reviewError=saved.errors[id];
+  if(!x.reviewStatus&&saved.processing?.includes(id))x.reviewStatus='⏳ กำลังตรวจและบันทึกผล';
   out.push(x);
  }
  return out;
 }
-async function refreshReview(owner,key,saved,all){
+export async function refreshReview(owner,key,saved,all){
  const rows=await reviewRows(saved,all,owner.ctx.storage),c=reviewCard(saved.stage,rows,saved.nonce),hash=await digest(c);
- if(saved.message&&saved.renderHash!==hash){await patch(owner.env,saved.message,c);saved.renderHash=hash;await owner.ctx.storage.put(key,saved);}
+ if(saved.message&&!saved.shared){
+  const oldMessage=saved.message;
+  saved.message=await send(owner.env,saved.recipient,c,await digest([key,'shared-card-v1']));
+  saved.shared=true;saved.sentAt=Date.now();saved.renderHash='';
+  await owner.ctx.storage.put(key,saved);
+  console.log('FINANCE_CARD_MIGRATED',saved.stage,oldMessage,saved.message);
+ }
+ if(saved.message&&saved.renderHash!==hash){await patch(owner.env,saved.message,c);saved.renderHash=hash;await owner.ctx.storage.put(key,saved);console.log('FINANCE_CARD_UPDATED',saved.message,rows.filter(x=>!x.reviewStatus).length);}
  return rows.filter(x=>!x.reviewStatus);
 }
 export const TABLE_REQUEST='ส่งให้นอต (คำสั่งจากตาราง)';
@@ -167,6 +176,7 @@ export async function tableReview(env,x){
 export async function financeTick(owner){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true')return {disabled:true};
  if(!env.LARK_VERIFICATION_TOKEN)throw Error('Missing callback verification setting');
+ for(const key of await ctx.storage.get('pending-finance-retries')||[]){const job=await ctx.storage.get(key);if(job&&!job.done&&job.nextAt<=Date.now()){await financeCallback(owner,job.body);break;}}
  const [all,recipients]=await Promise.all([snapshot(env),people(env)]);const groups={accounting:[],not:[],may:[],transfer:[],test:[]};
  // Recover receipts for existing cards without sending them again or inventing dates.
  if(ctx.storage.list&&!await ctx.storage.get('delivery-backfill:v1')){
@@ -182,8 +192,8 @@ export async function financeTick(owner){
    const active=[],covered=new Set();
    for(const key of await ctx.storage.get('active:'+stage)||[]){
     const saved=await ctx.storage.get(key);if(!saved?.sent)continue;
-    await recordNotDelivery(owner,key,saved,all);
-    const pending=await refreshReview(owner,key,saved,all);
+    try{await recordNotDelivery(owner,key,saved,all);}catch(e){console.log('DELIVERY_RECEIPT_RETRY',e.message);}
+    const pending=await refreshReview(owner,key,saved,all);await recordNotDelivery(owner,key,saved,all);
     if(pending.length&&saved.recipient===recipients[stage]){active.push(key);pending.forEach(x=>covered.add(x.r.record_id));}
    }
    const remaining=groups[stage].filter(x=>!covered.has(x.r.record_id)).sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));
@@ -192,7 +202,7 @@ export async function financeTick(owner){
     const key='card:v3:'+stage+':'+await digest([signatures,recipients[stage]]);
     let saved=await ctx.storage.get(key);
     if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:recipients[stage]};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
-    if(!saved.sent){const c=reviewCard(stage,chunk,saved.nonce);try{saved.message=await send(env,saved.recipient,c,await digest(key));}catch(e){if(stage==='not')await api(env,recordsPath(SUMMARY)+'/batch_update','POST',{records:chunk.map(x=>({record_id:x.r.record_id,fields:{[DELIVERY_STATUS]:'ส่งไม่สำเร็จ • ระบบจะลองใหม่'}}))});throw e;}saved.sent=true;saved.sentAt=Date.now();saved.renderHash=await digest(c);await ctx.storage.put(key,saved);sends++;}
+    if(!saved.sent){const c=reviewCard(stage,chunk,saved.nonce);try{saved.message=await send(env,saved.recipient,c,await digest(key));}catch(e){if(stage==='not')await api(env,recordsPath(SUMMARY)+'/batch_update','POST',{records:chunk.map(x=>({record_id:x.r.record_id,fields:{[DELIVERY_STATUS]:'ส่งไม่สำเร็จ • ระบบจะลองใหม่'}}))});throw e;}saved.sent=true;saved.shared=true;saved.sentAt=Date.now();saved.renderHash=await digest(c);await ctx.storage.put(key,saved);sends++;}
     await recordNotDelivery(owner,key,saved,all);
     active.push(key);
    }
@@ -206,7 +216,7 @@ export async function financeTick(owner){
    if(stage==='accounting'&&!recipients.accounting){console.log('FINANCE_ACCOUNTANT_MISSING',chunk.length);continue;}
    if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:recipients[stage]||recipients.not};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
    const c=['accounting','not','may'].includes(stage)?reviewCard(stage,chunk,saved.nonce):transferCard(chunk,stage==='test',(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=transfers&k='+encodeURIComponent(saved.nonce));
-   saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;await ctx.storage.put(key,saved);console.log('FINANCE_CARD_SENT',stage,chunk.length,saved.message);sends++;
+   saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;saved.shared=true;await ctx.storage.put(key,saved);console.log('FINANCE_CARD_SENT',stage,chunk.length,saved.message);sends++;
   }
   const old=await ctx.storage.get('active:'+stage)||[];
   // Retire only after replacements have all been sent.
@@ -219,7 +229,7 @@ export async function financeTick(owner){
  return {ok:true,sends};
 }
 export function verifiedCallback(env,b){return !!env.LARK_VERIFICATION_TOKEN&&b?.header?.token===env.LARK_VERIFICATION_TOKEN&&b.header.app_id===CFG.LARK_APP_ID&&b.header.event_type==='card.action.trigger';}
-export async function financeCallback(owner,b){
+async function runFinanceCallback(owner,b){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true'||!verifiedCallback(env,b))throw Error('Unauthorized callback');
  const v=b.event?.action?.value||{},actor=b.event?.operator?.open_id;
  const key=await ctx.storage.get('nonce:'+v.nonce),saved=key&&await ctx.storage.get(key);
@@ -227,9 +237,10 @@ export async function financeCallback(owner,b){
  if(!['accept','accept-all','return'].includes(v.action))return {ignored:true};
  const targets=saved.signatures.filter(x=>v.action==='accept-all'||x[0]===v.id);if(!targets.length)return {ignored:true};
  const recipients=await people(env);if(actor!==recipients[saved.stage])return {ignored:true};
- const all=await snapshot(env),results=[];
+ const all=await snapshot(env),results=[];let retry=false;saved.errors=saved.errors||{};saved.processing=targets.filter(([id])=>!saved.errors[id]?.includes('ข้อมูล')).map(x=>x[0]);await ctx.storage.put(key,saved);
+ try{await refreshReview(owner,key,saved,all);}catch(e){console.log('FINANCE_CARD_PATCH_RETRY',saved.message,e.message);}
  for(const [id,expected] of targets){
-  const doneKey='decision:'+saved.nonce+':'+id;if(await ctx.storage.get(doneKey)){results.push(id+' ทำรายการแล้ว');continue;}
+  const doneKey='decision:'+saved.nonce+':'+id;if(await ctx.storage.get(doneKey)){results.push(id+' ทำรายการแล้ว');saved.processing=saved.processing.filter(x=>x!==id);delete saved.errors[id];continue;}
   try{
    const x=all.find(x=>x.r.record_id===id);if(!x||await checkedStage(x.r,x.j)!==saved.stage||await fingerprint(x.r,x.j)!==expected)throw Error('ข้อมูลหรือสถานะเปลี่ยน กรุณาใช้การ์ดล่าสุด');
    // Read record immediately before mutation, and compare with issued card again.
@@ -244,12 +255,33 @@ export async function financeCallback(owner,b){
     saved.stage==='not'?{'นอตตรวจผ่าน':true,'ผู้ตรวจสอบก่อนอนุมัติ':'นอต (NOT)','เวลานอตตรวจผ่าน':Date.now(),'ข้อมูลที่นอตตรวจผ่าน':expected}:{Approve:true};
    await api(env,recordsPath(SUMMARY)+'/'+id,'PUT',{fields});
    Object.assign(x.r.fields,fields);
+   delete saved.errors[id];
    await ctx.storage.put(doneKey,{at:Date.now(),actor,action:v.action,fingerprint:expected});results.push(textOf(f['เลขใบขอเบิก'])+' '+(v.action==='return'?'ส่งกลับแล้ว':saved.stage==='accounting'?'บัญชีตรวจผ่านแล้ว รอส่งให้นอต':saved.stage==='not'?'ตรวจผ่านแล้ว':'อนุมัติแล้ว รอสร้าง PDF'));
-  }catch(e){results.push(id+' — '+e.message);}
+  }catch(e){const transient=rateLimited(e);retry=retry||transient;const label=textOf(all.find(x=>x.r.record_id===id)?.r.fields['เลขใบขอเบิก'])||id;
+   saved.errors[id]=transient?'⏳ ยังไม่สำเร็จ • Lark จำกัดคำขอ ระบบจะลองใหม่':'⚠️ ยังไม่สำเร็จ • '+e.message;results.push(label+' — '+saved.errors[id]);
+  }
+  saved.processing=saved.processing.filter(x=>x!==id);await ctx.storage.put(key,saved);
+  try{await refreshReview(owner,key,saved,all);}catch(e){console.log('FINANCE_CARD_PATCH_RETRY',saved.message,e.message);}
  }
  // Update this exact card after persisting the decision, including partial success.
  try{await refreshReview(owner,key,saved,all);}catch(e){console.log('FINANCE_CARD_PATCH_RETRY',saved.message,e.message);}
- await send(env,actor,card('ผลการดำเนินการ',[paragraph(results.map(md).join('\n'))]),await digest([saved.nonce,v.action,targets.map(x=>x[0])]));
- return {ok:true};
+ await send(env,actor,card('ผลการดำเนินการ',[paragraph(results.map(md).join('\n'))]),await digest([saved.nonce,v.action,targets.map(x=>x[0]),results]));
+ return {ok:!retry,retry};
 }
 
+
+const rateLimited=e=>Number(e?.code)===1254290||Number(e?.code)===230020||e?.status===429;
+// Only an authenticated human click creates a retry job; retries never invent approvals.
+export async function financeCallback(owner,b){
+ const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true'||!verifiedCallback(env,b))throw Error('Unauthorized callback');
+ const v=b.event?.action?.value||{},actor=b.event?.operator?.open_id;
+ const cardKey=await ctx.storage.get('nonce:'+v.nonce),saved=cardKey&&await ctx.storage.get(cardKey);
+ if(!saved||saved.retired||saved.recipient!==actor||!['not','may'].includes(saved.stage)||!['accept','accept-all','return'].includes(v.action)||Date.now()-saved.created>7*86400000)return {ignored:true};
+ const retryKey='finance-retry:'+await digest([v.nonce,v.action,v.id||'',b.header.event_id||'']);
+ const prior=await ctx.storage.get(retryKey);if(prior?.done)return {duplicate:true};
+ const job={body:b,attempt:(prior?.attempt||0)+1,nextAt:Date.now()+60000};await ctx.storage.put(retryKey,job);await ctx.storage.put('pending-finance-retries',[...new Set([...(await ctx.storage.get('pending-finance-retries')||[]),retryKey])]);
+ let result;
+ try{result=await runFinanceCallback(owner,b);}catch(e){if(!rateLimited(e)){job.done=true;await ctx.storage.put(retryKey,job);throw e;}result={retry:true};console.log('FINANCE_RETRY_QUEUED',job.attempt,e.message);}
+ if(!result.retry||job.attempt>=3){job.done=true;if(result.retry){const latest=await ctx.storage.get(cardKey);latest.processing=[];for(const id of Object.keys(latest.errors||{}))latest.errors[id]='⚠️ ยังไม่สำเร็จหลังลอง 3 ครั้ง • กดตรวจผ่านอีกครั้ง';await ctx.storage.put(cardKey,latest);job.exhausted=true;}}
+ await ctx.storage.put(retryKey,job);if(job.done)await ctx.storage.put('pending-finance-retries',(await ctx.storage.get('pending-finance-retries')||[]).filter(k=>k!==retryKey));return result;
+}

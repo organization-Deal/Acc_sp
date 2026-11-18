@@ -18,7 +18,8 @@ function harness(){
  globalThis.fetch=async(url,opt={})=>{
   const path=new URL(url).pathname,body=typeof opt.body==='string'?JSON.parse(opt.body):{};let data={};
   if(path.endsWith('/medias/upload_all')){if(failUpload){failUpload=false;return new Response(JSON.stringify({code:999,msg:'failed'}),{status:503});}assert.equal(opt.body.get('parent_type'),'bitable_file');assert.equal(opt.body.get('file').type,'application/pdf');const file='pdf_'+(files.size+1);files.set(file,await opt.body.get('file').arrayBuffer());data.file_token=file;}
-  else if(path.endsWith('/download'))return new Response(files.get(path.split('/').at(-2)));
+  else if(path.endsWith('/download')){const extra=JSON.parse(new URL(url).searchParams.get('extra'));assert.ok(extra.bitablePerm.tableId);assert.ok(Object.keys(extra.bitablePerm.attachments).length);return new Response(files.get(path.split('/').at(-2)));}
+  else if(path.endsWith('/fields'))data.items=Object.values(ED).map((name,i)=>({field_name:name,field_id:'fld'+i,type:17}));
   else if(path.includes('/im/v1/messages')){if(opt.method==='POST'){data.message_id='om_'+(++serial);cards.set(data.message_id,{to:body.receive_id,card:JSON.parse(body.content)});}else cards.get(path.split('/').pop()).card=JSON.parse(body.content);}
   else if(path.includes(CFG.T_EMPLOYEE))data.items=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
   else {const kind=Object.keys(EXTERNAL_TABLES).find(k=>path.includes(EXTERNAL_TABLES[k].table));assert.ok(kind,'unknown '+path);const r=rows[kind].find(r=>path.endsWith('/'+r.record_id));if(r){if(opt.method==='PUT'){if(failId===r.record_id){failId='';return new Response(JSON.stringify({code:1254290,msg:'rate limit'}));}writes.push({kind,id:r.record_id,fields:body.fields});Object.assign(r.fields,body.fields);}data.record=structuredClone(r);}else data.items=structuredClone(rows[kind]);}

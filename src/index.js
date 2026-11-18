@@ -1,3 +1,4 @@
+import {externalTick,externalCallback,externalPortalAuth,externalPortalAction,externalTransferPage,EXTERNAL_FLOW_VERSION} from './external-finance.js';
 import {portalAction,portalAuth,transferPage} from './transfer.js';
 import {financeTick,financeCallback,verifiedCallback} from './finance.js';
 import {validateBills} from './validation.js';
@@ -61,8 +62,9 @@ async function handleGet(request, env, ctx) {
   const url = new URL(request.url);
   const p = Object.fromEntries(url.searchParams);
   const act = p.act || '';
+  if(act==='external-transfers'){try{await doStub(env,'finance-coordinator-v1').externalTransferAccess(p.k);return new Response(externalTransferPage(p.k),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}catch{return new Response('ลิงก์หมดอายุ เปิดการ์ดรอโอนล่าสุด',{status:403});}}
   if(act==='transfers'){try{await doStub(env,'finance-coordinator-v1').transferAccess(p.k);return new Response(transferPage(p.k),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}catch{return new Response('ลิงก์หมดอายุ เปิดการ์ดล่าสุดในผู้ช่วยบัญชี',{status:403});}}
-  if (!act) return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v2', note: 'ส่งบิลในแชท Lark' });
+  if (!act) return json({ ok: true, bot: 'ReceiptBot', version: 'CF_WORKER_v2', externalFlow:EXTERNAL_FLOW_VERSION, note: 'ส่งบิลในแชท Lark' });
 
   // ── หน้าเว็บ "แมตยอด" (gate ด้วย token, ไม่ผูกกับ session บิล) ──
   if (act === 'matchpage') {
@@ -99,6 +101,7 @@ async function handleGet(request, env, ctx) {
 async function handlePost(request, env, ctx) {
   const url = new URL(request.url);
   const act = url.searchParams.get('act');
+  if(act==='external-transfer-api'){try{return json(await doStub(env,'finance-coordinator-v1').externalTransferAction(await request.json()));}catch(e){return json({ok:false,error:e.message});}}
   if(act==='transfer-api'){try{return json(await doStub(env,'finance-coordinator-v1').transferAction(await request.json()));}catch(e){return json({ok:false,error:e.message});}}
 
   // อัปโหลดรูปหลักฐานจากหน้าเว็บ (body = raw bytes ของรูป ไม่ใช่ JSON)
@@ -129,6 +132,11 @@ async function handlePost(request, env, ctx) {
 
   let body;
   try { body = await request.json(); } catch (e) { return json({ ok: true }); }
+  if (body.event?.action?.value?.externalFinance === true) {
+    if (env.FINANCE_ENABLED !== 'true' || !verifiedCallback(env,body)) return new Response('Unauthorized',{status:403});
+    ctx.waitUntil(doStub(env,'finance-coordinator-v1').externalDecide(body));
+    return json({toast:{type:'info',content:'กำลังบันทึกผลตรวจและส่งต่อรายการ'}});
+  }
   if (body.event?.action?.value?.finance === true) {
     if (env.FINANCE_ENABLED !== 'true' || !verifiedCallback(env,body)) return new Response('Unauthorized',{status:403});
     ctx.waitUntil(doStub(env,'finance-coordinator-v1').financeDecide(body));
@@ -220,13 +228,16 @@ export class SessionDO extends DurableObject {
   async transferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>portalAction(this,b));this.financeSerial=run.catch(()=>{});return run;}
 
   async financePoll() {
-    const run=(this.financeSerial||Promise.resolve()).then(()=>financeTick(this));
+    const run=(this.financeSerial||Promise.resolve()).then(async()=>{const results=await Promise.allSettled([financeTick(this),externalTick(this)]);for(let i=0;i<results.length;i++)if(results[i].status==='rejected')console.log(i?'EXTERNAL_FINANCE_ERROR':'FINANCE_ERROR',results[i].reason?.message);return results.map(r=>r.status==='fulfilled'?r.value:{error:String(r.reason?.message)});});
     this.financeSerial=run.catch(()=>{});return run;
   }
   async financeDecide(body) {
     const run=(this.financeSerial||Promise.resolve()).then(()=>financeCallback(this,body));
     this.financeSerial=run.catch(()=>{});return run;
   }
+  async externalDecide(body){const run=(this.financeSerial||Promise.resolve()).then(async()=>{const r=await externalCallback(this,body);await externalTick(this);return r;});this.financeSerial=run.catch(()=>{});return run;}
+  async externalTransferAccess(k){await externalPortalAuth(this,k);return true;}
+  async externalTransferAction(b){const run=(this.financeSerial||Promise.resolve()).then(()=>externalPortalAction(this,b));this.financeSerial=run.catch(()=>{});return run;}
 
   async #load()  {
     const s = (await this.ctx.storage.get('session')) || {};

@@ -2,6 +2,8 @@ import {PDFDocument,PDFName,PDFHexString,PDFOperator,rgb,beginText,endText,setFo
 import fontkit from '@pdf-lib/fontkit';
 import {SARABUN_BASE64} from './sarabun-font.js';
 
+export const EXTERNAL_PDF_TEMPLATE_VERSION=2;
+
 const bytes=Uint8Array.from(atob(SARABUN_BASE64),c=>c.charCodeAt(0));
 const face=fontkit.create(bytes);
 const navy=[.10,.16,.25],teal=[.02,.40,.42],grey=[.36,.42,.48];
@@ -42,11 +44,7 @@ export async function renderExternalPdf(m){
  section('03  หลักฐานประกอบ');
  text(m.evidence.length?m.evidence.map((v,i)=>(i+1)+'. '+v).join('\n'):'เอกสารประกอบอ้างอิงตามลิงก์รายการต้นทาง',{size:9,gap:14});
  if(m.peak)link('เปิดเอกสาร PEAK เดิม',m.peak);link('เปิดรายการต้นทางและหลักฐานแนบทั้งหมด',m.sourceUrl);
- section('04  ผลตรวจและอนุมัติ');
- const rows=[['บัญชีตรวจ',m.accounting?('ตรวจผ่าน '+date(m.accounting.at)):'รอตรวจ'],['นอตตรวจ',m.not?(m.not.name+' | '+date(m.not.at)):'รอตรวจ'],['เมย์อนุมัติ',m.may?(m.may.name+' | '+date(m.may.at)):'รออนุมัติ']];
- for(const [label,value] of rows)text(label+': '+value,{size:9,gap:16});
- if(m.stage!=='request')text('บันทึกผลผ่านระบบอนุมัติ โดยอ้างอิงรายการเดียวกับเอกสารนี้',{size:8,color:grey,gap:14});
- if(m.stage==='paid'){section('05  หลักฐานการโอน');text('แนบและตรวจหลักฐานเมื่อ '+date(m.paid.at),{size:9,gap:16});text('เลขอ้างอิงธนาคาร: '+m.paid.ref,{size:9,gap:16});text('ผู้บันทึก: '+m.paid.name,{size:9,gap:16});text('สลิปการโอนผูกอยู่ในรายการต้นทาง',{size:9,gap:16});}
+ if(m.stage==='paid'){section('04  หลักฐานการโอน');text('แนบและตรวจหลักฐานเมื่อ '+date(m.paid.at),{size:9,gap:16});text('เลขอ้างอิงธนาคาร: '+m.paid.ref,{size:9,gap:16});text('ผู้บันทึก: '+m.paid.name,{size:9,gap:16});text('สลิปการโอนผูกอยู่ในรายการต้นทาง',{size:9,gap:16});}
  for(let i=0;i<pages.length;i++){page=pages[i];key=page.node.newFontDictionary(font.name,font.ref);line('เอกสารขออนุมัติภายใน - ไม่ใช่ใบเสร็จรับเงินหรือใบกำกับภาษี',left,38,8,grey);line(m.number+' | '+(i+1)+'/'+pages.length,left,24,7,grey);}
  return doc.save();
 }

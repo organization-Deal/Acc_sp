@@ -120,6 +120,27 @@ async function refreshReview(owner,key,saved,all){
  return rows.filter(x=>!x.reviewStatus);
 }
 export const TABLE_REQUEST='ส่งให้นอต (คำสั่งจากตาราง)';
+export const DELIVERY_STATUS='สถานะส่งให้นอต', DELIVERY_AT='วันที่–เวลาส่งให้นอต', DELIVERY_ID='รหัสข้อความส่งให้นอต';
+// This receipt is written only after Lark has returned a message_id.
+export async function recordNotDelivery(owner,key,saved,all){
+ if(saved.stage!=='not'||!saved.sent||!saved.message)return;
+ const {env,ctx}=owner;
+ const targets=[];
+ for(const [id,expected,,,accountingAt] of saved.signatures){
+  const x=all.find(x=>x.r.record_id===id);if(!x?.j)continue;
+  if(await fingerprint(x.r,x.j)!==expected||accountingAt!==undefined&&accountingAt!==(x.r.fields['เวลาบัญชีตรวจผ่าน']||0))continue;
+  targets.push(x);
+ }
+ if(!targets.length)return;
+ if(!saved.sentAt){
+  const d=await api(env,'im/v1/messages/'+encodeURIComponent(saved.message));
+  const m=d.items?.find(x=>x.message_id===saved.message),at=Number(m?.create_time);
+  if(!Number.isFinite(at)||at<=0)throw Error('ไม่พบเวลาส่งจาก Lark');
+  saved.sentAt=at;await ctx.storage.put(key,saved);
+ }
+ const updates=targets.filter(x=>Number(x.r.fields[DELIVERY_AT]||0)<saved.sentAt||textOf(x.r.fields[DELIVERY_ID])===saved.message&&textOf(x.r.fields[DELIVERY_STATUS])!=='ส่งแล้ว').map(x=>({record_id:x.r.record_id,fields:{[DELIVERY_STATUS]:'ส่งแล้ว',[DELIVERY_AT]:saved.sentAt,[DELIVERY_ID]:saved.message}}));
+ if(updates.length){const d=await api(env,recordsPath(SUMMARY)+'/batch_update','POST',{records:updates});if(!d.records||d.records.length!==updates.length)throw Error('บันทึกหลักฐานส่งไม่ครบ');for(const u of updates)Object.assign(targets.find(x=>x.r.record_id===u.record_id).r.fields,u.fields);}
+}
 export function tableReviewProblem(r,j){
  const f=r.fields||{};
  if(f.Approve===true||j?.state==='APPROVED'||f['รายการสำเร็จ']===true||f['จ่ายแล้ว (PEAK)']===true)return 'อนุมัติหรือจ่ายแล้ว ไม่ส่งซ้ำ';
@@ -132,11 +153,11 @@ export async function tableReview(env,x){
  if(x.r.fields[TABLE_REQUEST]!==true)return;
  const problem=tableReviewProblem(x.r,x.j);
  const fields={[TABLE_REQUEST]:false};
- if(problem)fields['ผลตรวจบัญชี (ระบบ)']=problem;
+ if(problem){fields['ผลตรวจบัญชี (ระบบ)']=problem;if(!x.r.fields[DELIVERY_ID])fields[DELIVERY_STATUS]='ยังไม่ส่ง • '+problem;}
  else {
   const hash=await fingerprint(x.r,x.j);
-  if(x.r.fields['บัญชีตรวจผ่าน']===true&&textOf(x.r.fields['ข้อมูลที่บัญชีตรวจผ่าน'])===hash&&!x.r.fields['ส่งกลับแก้ไขก่อนอนุมัติ'])fields['ผลตรวจบัญชี (ระบบ)']='ส่งให้นอตแล้ว ไม่ส่งซ้ำ';
-  else Object.assign(fields,{'บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'ตรวจผ่านจากปุ่มในตารางสรุปรอบเบิก','เวลาบัญชีตรวจผ่าน':Date.now(),'ข้อมูลที่บัญชีตรวจผ่าน':hash,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','ผู้ตรวจสอบก่อนอนุมัติ':'','เวลานอตตรวจผ่าน':null,'ส่งกลับแก้ไขก่อนอนุมัติ':false,Reject:false,'ผลตรวจบัญชี (ระบบ)':'บัญชีตรวจผ่าน • รอนอตตรวจ'});
+  if(x.r.fields['บัญชีตรวจผ่าน']===true&&textOf(x.r.fields['ข้อมูลที่บัญชีตรวจผ่าน'])===hash&&!x.r.fields['ส่งกลับแก้ไขก่อนอนุมัติ']){fields['ผลตรวจบัญชี (ระบบ)']=x.r.fields[DELIVERY_ID]?'ส่งให้นอตแล้ว ไม่ส่งซ้ำ':'รับคำสั่งแล้ว • รอส่งให้นอต';if(!x.r.fields[DELIVERY_ID])fields[DELIVERY_STATUS]='รอส่ง';}
+  else Object.assign(fields,{'บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'ตรวจผ่านจากปุ่มในตารางสรุปรอบเบิก','เวลาบัญชีตรวจผ่าน':Date.now(),'ข้อมูลที่บัญชีตรวจผ่าน':hash,'นอตตรวจผ่าน':false,'ข้อมูลที่นอตตรวจผ่าน':'','ผู้ตรวจสอบก่อนอนุมัติ':'','เวลานอตตรวจผ่าน':null,'ส่งกลับแก้ไขก่อนอนุมัติ':false,Reject:false,'ผลตรวจบัญชี (ระบบ)':'บัญชีตรวจผ่าน • รอส่งให้นอต',[DELIVERY_STATUS]:'รอส่ง',[DELIVERY_AT]:null,[DELIVERY_ID]:''});
  }
  await api(env,recordsPath(SUMMARY)+'/'+x.r.record_id,'PUT',{fields});
  Object.assign(x.r.fields,fields);
@@ -146,6 +167,12 @@ export async function financeTick(owner){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true')return {disabled:true};
  if(!env.LARK_VERIFICATION_TOKEN)throw Error('Missing callback verification setting');
  const [all,recipients]=await Promise.all([snapshot(env),people(env)]);const groups={accounting:[],not:[],may:[],transfer:[],test:[]};
+ // Recover receipts for existing cards without sending them again or inventing dates.
+ if(ctx.storage.list&&!await ctx.storage.get('delivery-backfill:v1')){
+  let complete=true;
+  for(const prefix of ['card:v2:not:','card:v3:not:']){const old=await ctx.storage.list({prefix});for(const [key,saved] of old){try{await recordNotDelivery(owner,key,saved,all);}catch(e){complete=false;console.log('DELIVERY_RECEIPT_RETRY',e.message);}}}
+  if(complete)await ctx.storage.put('delivery-backfill:v1',true);
+ }
  for(const x of all){if(x.r.fields[TABLE_REQUEST]===true)await tableReview(env,x);const stage=await checkedStage(x.r,x.j);if(stage!=='accounting'&&groups[stage])groups[stage].push(x);}
  if(env.FINANCE_TEST_ONLY==='true'){groups.accounting=[];groups.not=[];groups.may=[];groups.transfer=[];}
  let sends=0;
@@ -154,6 +181,7 @@ export async function financeTick(owner){
    const active=[],covered=new Set();
    for(const key of await ctx.storage.get('active:'+stage)||[]){
     const saved=await ctx.storage.get(key);if(!saved?.sent)continue;
+    await recordNotDelivery(owner,key,saved,all);
     const pending=await refreshReview(owner,key,saved,all);
     if(pending.length&&saved.recipient===recipients[stage]){active.push(key);pending.forEach(x=>covered.add(x.r.record_id));}
    }
@@ -163,7 +191,8 @@ export async function financeTick(owner){
     const key='card:v3:'+stage+':'+await digest([signatures,recipients[stage]]);
     let saved=await ctx.storage.get(key);
     if(!saved){saved={stage,nonce:crypto.randomUUID(),signatures,created:Date.now(),recipient:recipients[stage]};await ctx.storage.put(key,saved);await ctx.storage.put('nonce:'+saved.nonce,key);}
-    if(!saved.sent){const c=reviewCard(stage,chunk,saved.nonce);saved.message=await send(env,saved.recipient,c,await digest(key));saved.sent=true;saved.renderHash=await digest(c);await ctx.storage.put(key,saved);sends++;}
+    if(!saved.sent){const c=reviewCard(stage,chunk,saved.nonce);try{saved.message=await send(env,saved.recipient,c,await digest(key));}catch(e){if(stage==='not')await api(env,recordsPath(SUMMARY)+'/batch_update','POST',{records:chunk.map(x=>({record_id:x.r.record_id,fields:{[DELIVERY_STATUS]:'ส่งไม่สำเร็จ • ระบบจะลองใหม่'}}))});throw e;}saved.sent=true;saved.sentAt=Date.now();saved.renderHash=await digest(c);await ctx.storage.put(key,saved);sends++;}
+    await recordNotDelivery(owner,key,saved,all);
     active.push(key);
    }
    await ctx.storage.put('active:'+stage,active);continue;

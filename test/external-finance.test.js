@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {EF,EXTERNAL_TABLES,externalRow,externalFingerprint,externalProblem,externalStage,externalTick as poll,externalCallback,externalPortalAction,externalSlipFits,externalTransferPage} from '../src/external-finance.js';
-import {ED,documentMeta,documentReady} from '../src/external-documents.js';
+import {ED,documentMeta,documentReady,documentSignature} from '../src/external-documents.js';
 import {PDFDocument} from 'pdf-lib';
 import {digest} from '../src/finance.js';
-import {externalDocumentAccess} from '../src/external-finance.js';
+import {externalDocumentAccess,externalTransferCard,externalPortalAuth} from '../src/external-finance.js';
 import {CFG} from '../src/config.js';
 import {signMatchToken,matchApi} from '../src/match.js';
 import {createHash} from 'node:crypto';
@@ -51,10 +51,54 @@ test('full 11-record flow starts only at accounting and sends Not → May → No
   const notKeys=[...h.db.get('external:active:not')];for(const k of notKeys){const saved=h.db.get(k);assert.ok((await externalCallback(h.owner,h.callback(saved))).ok);}
   await externalTick(h.owner);assert.equal(h.db.get('external:active:not').length,0);const mayKeys=[...h.db.get('external:active:may')];assert.equal(mayKeys.length,3);for(const r of Object.values(h.rows).flat())assert.ok(JSON.parse(r.fields[EF.audit]).delivery.may.message);
   for(const k of mayKeys){const saved=h.db.get(k);assert.equal(saved.recipient,'ou_may');assert.ok((await externalCallback(h.owner,h.callback(saved))).ok);}
-  await externalTick(h.owner);assert.equal(h.db.get('external:active:transfer').length,3);
+  await externalTick(h.owner);assert.equal(h.db.get('external:active:transfer').length,1);
   for(const kind of Object.keys(h.rows))for(const r of h.rows[kind]){assert.equal(await externalStage(externalRow(kind,r)),'transfer');assert.notEqual(r.fields['รายการสำเร็จ'],true);assert.notEqual(r.fields['จ่ายแล้ว (PEAK)'],true);assert.match(r.fields[EF.delivery],/^ส่งแล้ว/);}
   assert.ok(h.writes.every(w=>!('ลงบันทึกค่าใช้จ่ายใน PEAK' in w.fields)&&!('เลขที่บัญชีธนาคาร' in w.fields)&&!('เลขบัญชีผู้รับเงิน' in w.fields)));
   const n=h.cards.size;await externalTick(h.owner);assert.equal(h.cards.size,n);
+ }finally{h.restore();}
+});
+
+// Seed completed approvals/documents without rendering many PDFs in queue tests.
+async function readyTransfer(kind,i){
+ const r=record(kind,i),x=externalRow(kind,r),hash=await externalFingerprint(x);
+ x.audit={version:1,fingerprintVersion:2,stage:'transfer',fingerprint:hash,epoch:'epoch-'+kind+i,accounting:{at:100},not:{actor:'ou_not',at:200},may:{actor:'ou_may',at:300}};
+ r.fields[EF.audit]=JSON.stringify(x.audit);r.fields[ED.number]='DOC-'+kind+i;
+ const meta={};for(const stage of ['request','approved']){const file=stage+'-'+kind+i;r.fields[ED[stage]]=[{file_token:file}];meta[stage]={file,fingerprint:hash,signature:await documentSignature(x,hash,stage),templateVersion:EXTERNAL_PDF_TEMPLATE_VERSION,signingVersion:1};}
+ r.fields[ED.meta]=JSON.stringify(meta);return r;
+}
+test('one transfer summary absorbs later approvals, removes closed/changed rows, and stays reusable when empty',async()=>{
+ const h=harness();try{
+  h.rows.partner.push(await readyTransfer('partner',0));await poll(h.owner);
+  const key=h.db.get('external:active:transfer')[0],first=h.db.get(key);assert.equal(h.cards.size,1);
+  h.rows.dealpay.push(await readyTransfer('dealpay',0));await poll(h.owner);
+  assert.deepEqual(h.db.get('external:active:transfer'),[key]);assert.equal(h.db.get(key).message,first.message);assert.equal(h.cards.size,1);
+  let text=JSON.stringify(h.cards.get(first.message).card);assert.match(text,/รอโอน 2 รายการ • รวม 208.00 THB/);assert.match(text,/คู่ค้า 1 รายการ • DEALPAY 1 รายการ/);
+  assert.equal((await externalPortalAction(h.owner,{token:first.nonce,op:'rows'})).rows.length,2);
+  h.rows.partner[0].fields['รายการสำเร็จ']=true;h.rows.dealpay[0].fields['จำนวนเงิน']=30;await poll(h.owner);
+  text=JSON.stringify(h.cards.get(first.message).card);assert.match(text,/รอโอน 0 รายการ/);assert.doesNotMatch(text,/Customer 0|Vendor 0/);
+  h.rows.dealpay.push(await readyTransfer('dealpay',1));await poll(h.owner);assert.equal(h.cards.size,1);assert.equal(h.db.get(key).signatures.length,1);
+ }finally{h.restore();}
+});
+test('legacy transfer cards merge into the newest card and old links retire without financial writes',async()=>{
+ const h=harness();try{
+  h.rows.partner.push(await readyTransfer('partner',0));h.rows.dealpay.push(await readyTransfer('dealpay',0));
+  for(let i=0;i<2;i++){const key='old'+i,saved={version:1,stage:'transfer',recipient:'ou_not',nonce:'nonce'+i,created:Date.now()-10000+i,message:'old-message'+i,signatures:[]};h.db.set(key,saved);h.db.set('external:nonce:'+saved.nonce,key);h.cards.set(saved.message,{to:'ou_not',card:{}});}
+  h.db.set('external:active:transfer',['old0','old1']);const audits=Object.values(h.rows).flat().map(r=>r.fields[EF.audit]);
+  await poll(h.owner);assert.deepEqual(h.db.get('external:active:transfer'),['old1']);assert.equal(h.cards.size,2);assert.equal(h.db.get('old1').signatures.length,2);assert.equal(h.db.get('old0').retired,true);
+  assert.match(JSON.stringify(h.cards.get('old-message0').card),/รวมรายการรอโอนแล้ว/);assert.deepEqual(Object.values(h.rows).flat().map(r=>r.fields[EF.audit]),audits);
+  await assert.rejects(()=>externalPortalAuth(h.owner,'nonce0'),/หมดอายุ/);await externalPortalAuth(h.owner,'nonce1');
+  const current=h.db.get('old1');current.created=Date.now()-8*86400000;h.db.set('old1',current);await poll(h.owner);
+  assert.equal(h.cards.size,3);assert.equal(h.db.get('external:active:transfer').length,1);assert.equal(h.db.get('old1').retired,true);
+ }finally{h.restore();}
+});
+test('large queues remain one bounded card with exact totals and every row in the transfer portal',async()=>{
+ const h=harness();try{
+  for(let i=0;i<65;i++)h.rows.dealpay.push(await readyTransfer('dealpay',i));await poll(h.owner);
+  assert.equal(h.cards.size,1);const saved=h.db.get(h.db.get('external:active:transfer')[0]),card=h.cards.get(saved.message).card,text=JSON.stringify(card);
+  assert.match(text,/รอโอน 65 รายการ • รวม 1,300.00 THB/);assert.match(text,/แสดง 20 จาก 65 รายการ/);assert.ok(new TextEncoder().encode(text).length<28000);
+  assert.equal((await externalPortalAction(h.owner,{token:saved.nonce,op:'rows'})).rows.length,65);
+  const demoRows=[externalRow('dealpay',h.rows.dealpay[0]),externalRow('dealpay',h.rows.dealpay[1])];demoRows[0].amount=0.1;demoRows[1].amount=0.2;demoRows[1].company={id:'PSH',name:'Example company'};
+  assert.match(JSON.stringify(externalTransferCard(saved,demoRows,h.owner.env)),/รวม 0.30 THB/);
  }finally{h.restore();}
 });
 test('wrong actor/token cannot approve; duplicate and partial failed clicks preserve successful rows',async()=>{

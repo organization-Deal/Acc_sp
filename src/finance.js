@@ -53,9 +53,17 @@ export async function checkedStage(r,j){
  return stage;
 }
 export async function api(env,path,method='GET',body){
- const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
- const result=await response.json();if(!response.ok||result.code!==0){const e=Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));e.code=result.code;e.status=response.status;throw e;}return result.data;
+ for(let attempt=0;;attempt++){
+  const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
+  const result=await response.json();
+  if(response.ok&&result.code===0)return result.data;
+  const e=Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));e.code=result.code;e.status=response.status;
+  // Reads and exact card replacements can retry here. Decisions retry through the durable queue and revalidate.
+  if(['GET','PATCH'].includes(method)&&rateLimited(e)&&attempt<2){await new Promise(resolve=>setTimeout(resolve,(attempt+1)*2000));continue;}
+  throw e;
+ }
 }
+
 export const recordsPath=table=>'bitable/v1/apps/'+CFG.BASE_TOKEN+'/tables/'+table+'/records';
 async function list(env,table){let rows=[],page='';do{const d=await api(env,recordsPath(table)+'?page_size=500'+(page?'&page_token='+encodeURIComponent(page):''));rows.push(...(d.items||[]));page=d.has_more?d.page_token:'';}while(page);return rows;}
 export async function snapshot(env){

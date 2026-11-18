@@ -181,7 +181,7 @@ export async function tableReview(env,x){
  Object.assign(x.r.fields,fields);
 }
 // Single coordinator DO serializes polling and callbacks; receipt sessions use other names.
-export async function financeTick(owner){
+export async function financeTick(owner,{unifiedTransfers=false}={}){
  const {env,ctx}=owner;if(env.FINANCE_ENABLED!=='true')return {disabled:true};
  if(!env.LARK_VERIFICATION_TOKEN)throw Error('Missing callback verification setting');
  for(const key of await ctx.storage.get('pending-finance-retries')||[]){const job=await ctx.storage.get(key);if(job&&!job.done&&job.nextAt<=Date.now()){await financeCallback(owner,job.body);break;}}
@@ -196,6 +196,7 @@ export async function financeTick(owner){
  if(env.FINANCE_TEST_ONLY==='true'){groups.accounting=[];groups.not=[];groups.may=[];groups.transfer=[];}
  let sends=0;
  for(const stage of Object.keys(groups)){
+  if(stage==='transfer'&&unifiedTransfers)continue;
   if(['not','may'].includes(stage)){
    const active=[],covered=new Set();
    for(const key of await ctx.storage.get('active:'+stage)||[]){

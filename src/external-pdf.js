@@ -30,7 +30,7 @@ export async function renderExternalPdf(m){
  function pair(a,b){const half=(width-22)/2,la=wrap(a[1]||'-',half,10),lb=wrap(b[1]||'-',half,10),h=Math.max(la.length,lb.length)*15+23;room(h);line(a[0],left,y,8,grey);line(b[0],left+half+22,y,8,grey);y-=17;const top=y;la.forEach((t,i)=>line(t,left,top-i*15));lb.forEach((t,i)=>line(t,left+half+22,top-i*15));y-=Math.max(la.length,lb.length)*15+8;}
  function link(label,url){room(18);line(label,left,y,9,teal);const ann=doc.context.obj({Type:'Annot',Subtype:'Link',Rect:[left,y-3,left+Math.min(width,measure(label,9)),y+11],Border:[0,0,0],A:{Type:'Action',S:'URI',URI:PDFHexString.fromText(url)}});page.node.addAnnot(doc.context.register(ann));y-=18;}
  newPage();text(m.company.name,{size:15,gap:21});text(m.company.address,{size:9,color:grey,gap:14});text('เลขประจำตัวผู้เสียภาษี '+(m.company.taxId||'-'),{size:9,color:grey,gap:14});y-=12;
- text(m.title,{size:20,gap:28,color:teal});text(m.stage==='paid'?'ฉบับปิดรายการ - มีหลักฐานโอนแนบ':m.stage==='approved'?'ฉบับอนุมัติแล้ว - รอดำเนินการโอน':'ฉบับขออนุมัติ - รอบัญชีตรวจ',{size:10,gap:18,color:grey});
+ text(m.title,{size:20,gap:28,color:teal});text(m.stage==='paid'?'ฉบับปิดรายการ - มีหลักฐานโอนแนบ':m.stage==='approved'?'ฉบับอนุมัติแล้ว - รอดำเนินการโอน':'ฉบับขออนุมัติ - ตรวจสถานะล่าสุดในรายการ',{size:10,gap:18,color:grey});
  pair(['เลขเอกสาร / ฉบับที่',m.number+' / '+m.revision],['วันที่จัดทำ',date(m.generatedAt)]);
  section('01  ผู้ตั้งเบิกและผู้รับเงินจริง');
  pair(['พนักงานผู้ตั้งเบิก',m.requester],['ผู้รับเงินภายนอก',m.payee]);

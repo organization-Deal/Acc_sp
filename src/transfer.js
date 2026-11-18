@@ -1,10 +1,64 @@
 import {snapshot,people,financeStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath} from './finance.js';
 import {matchOCR} from './match.js';
-import {uploadBytesToBitable} from './lark.js';
+import {uploadBytesToBitable,downloadMediaByToken} from './lark.js';
 const digits=v=>String(v||'').replace(/\D/g,'');
+// Keep visible digits in their original positions: K BIZ also hides the final digit.
+export function accountFits(raw,account){
+ const mask=String(raw||'').trim().toLowerCase().replace(/[\s-]/g,'').replace(/[*•●]/g,'x');
+ const target=String(account||'').replace(/\D/g,'');
+ if(!/^[0-9x]+$/.test(mask)||mask.replace(/x/g,'').length<4||!target)return false;
+ if(mask.includes('x'))return mask.length===target.length&&[...mask].every((c,i)=>c==='x'||c===target[i]);
+ return mask.length<=target.length&&target.endsWith(mask);
+}
+export function bankCode(value){
+ const v=String(value||'').toUpperCase().replace(/[\s.()_-]/g,'');
+ if(/กสิกร|KASIKORN|KBANK/.test(v))return 'KBANK';
+ if(/ไทยพาณิชย์|SIAMCOMMERCIAL|SCB/.test(v))return 'SCB';
+ if(/กรุงไทย|KRUNGTHAI|KTB/.test(v)||v==='BT')return 'KTB';
+ if(/กรุงศรี|AYUDHYA|BAY/.test(v))return 'BAY';
+ if(/กรุงเทพ|BANGKOKBANK|BBL/.test(v))return 'BBL';
+ if(/ทหารไทย|ธนชาต|TMB|TTB/.test(v))return 'TTB';
+ if(/ออมสิน|GSB/.test(v))return 'GSB';
+ if(/พร้อมเพย์|PROMPTPAY/.test(v))return 'PROMPTPAY';
+ return '';
+}
+export function payerCompany(o){
+ const v=String(o.sender_name||'').toUpperCase().replace(/\s/g,'');
+ const ids=[];
+ if(/OMNIDASHPAYWALLET|ออมนิแดชเพย์วอลเล/.test(v))ids.push('ODP');
+ if(/PROSPERWEALTHYASSET|พรอสเพอร์เวลธี่เอสเซท/.test(v))ids.push('PWA');
+ if(/PROSERVICEHOMESOLUTION|โปรเซอร์วิสโฮมโซลูชั่น/.test(v))ids.push('PSH');
+ return ids.length===1?ids[0]:'';
+}
 export function slipFits(o,r){
- const acc=digits(o.recipient_acct), target=digits(r.account);
- return Number.isFinite(Number(o.amount))&&Math.round(Number(o.amount)*100)===Math.round(r.amount*100)&&String(o.currency||'').toUpperCase()===r.currency&&acc.length>=4&&target.endsWith(acc);
+ const payer=payerCompany(o),cid=r.company_id||r.company?.id;
+ const fromBank=bankCode(o.recipient_bank),toBank=bankCode(r.bank);
+ return o.amount!==null&&o.amount!==''&&Number.isFinite(Number(o.amount))&&Number(o.amount)>0&&Math.round(Number(o.amount)*100)===Math.round(r.amount*100)
+  &&String(o.currency||'').toUpperCase()===r.currency&&accountFits(o.recipient_acct_mask||o.recipient_acct,r.account)
+  &&(!payer||!cid||payer===cid)&&(!o.recipient_bank||(!!fromBank&&!!toBank&&fromBank===toBank));
+}
+export function slipChoices(o,rows,company){return rows.filter(r=>!r.hasSlip&&(!company||r.company_id===company)&&slipFits(o,r));}
+async function saveDraft(owner,d){for(const key of ['draft:'+d.id,'external:draft:'+d.id,'draftHash:'+d.hash])await owner.ctx.storage.put(key,d);}
+export async function resumeDrafts(owner,saved){
+ const all=new Map();for(const prefix of ['draft:','external:draft:'])for(const [,d] of await owner.ctx.storage.list({prefix})){
+  if(d.owner!==saved.recipient||Date.now()-d.at>2*3600000||await owner.ctx.storage.get('paidHash:'+d.hash))continue;
+  if(!all.has(d.refKey))all.set(d.refKey,d);
+ }
+ return [...all.values()].sort((a,b)=>a.at-b.at).slice(-50);
+}
+export async function rereadDraft(owner,id,saved){
+ const d=await owner.ctx.storage.get('draft:'+id)||await owner.ctx.storage.get('external:draft:'+id);
+ if(!d||d.owner!==saved.recipient||Date.now()-d.at>2*3600000)throw Error('สลิปหมดอายุ กรุณาอ่านใหม่');
+ if(await owner.ctx.storage.get('paidHash:'+d.hash))throw Error('สลิปนี้แนบสำเร็จแล้ว');
+ const bytes=new Uint8Array(await downloadMediaByToken(owner.env,d.file));let bin='';
+ for(let i=0;i<bytes.length;i+=32768)bin+=String.fromCharCode(...bytes.subarray(i,i+32768));
+ const image=btoa(bin),mime=bytes[0]===137?'image/png':bytes[0]===82?'image/webp':'image/jpeg';
+ if(d.ocrVersion!==2){
+  const o=await matchOCR(owner.env,image,mime);
+  if(String(o.ref||'').replace(/\s/g,'')!==d.ref)throw Error('เลขอ้างอิงที่อ่านใหม่ไม่ตรง กรุณาตรวจภาพต้นฉบับ');
+  d.ocr=o;d.ocrVersion=2;d.mime=mime;await saveDraft(owner,d);
+ }
+ return {ok:true,draft:d,preview:'data:'+mime+';base64,'+image};
 }
 export async function portalAuth(owner,k){
  const key=await owner.ctx.storage.get('nonce:'+k), saved=key&&await owner.ctx.storage.get(key);
@@ -18,6 +72,8 @@ export async function portalAction(owner,b,session){
  const {ctx,env}=owner, saved=session||await portalAuth(owner,b.token),test=saved.stage==='test';
  if(b.op==='rows')return {ok:true,test,rows:(await queue(owner,test)).map(view)};
  if(test)throw Error('TEST ดูและคัดลอกตัวอย่างได้ แต่ไม่รับสลิปจริงและไม่เปลี่ยนสถานะจ่าย');
+ if(b.op==='resume')return {ok:true,drafts:await resumeDrafts(owner,saved)};
+ if(b.op==='reread')return rereadDraft(owner,b.draft,saved);
  if(b.op==='prepare'){
   if(!['image/jpeg','image/png','image/webp'].includes(b.mime)||typeof b.image!=='string'||b.image.length>9*1024*1024)throw Error('รับ JPG/PNG/WebP ไม่เกิน 6 MB ต่อใบ');
   const bin=atob(b.image),bytes=Uint8Array.from(bin,c=>c.charCodeAt(0)),hash=await digest(b.image);
@@ -30,8 +86,8 @@ export async function portalAction(owner,b,session){
   const refKey='paidRef:'+await digest(ref);
   if(await ctx.storage.get(refKey))throw Error('เลขอ้างอิงนี้เคยใช้แล้ว');
   const file=await uploadBytesToBitable(env,bytes.buffer,b.filename||'transfer.jpg');
-  draft={id:crypto.randomUUID(),hash,refKey,ref,ocr:o,file,owner:saved.recipient,at:Date.now()};
-  await ctx.storage.put('draft:'+draft.id,draft);await ctx.storage.put('draftHash:'+hash,draft);
+  draft={id:crypto.randomUUID(),hash,refKey,ref,ocr:o,ocrVersion:2,file,filename:b.filename||'transfer.jpg',mime:b.mime,owner:saved.recipient,at:Date.now()};
+  await saveDraft(owner,draft);
   return {ok:true,draft};
  }
  if(b.op==='commit'){
@@ -72,11 +128,54 @@ async function copy(v,b){try{await navigator.clipboard.writeText(v);b.textConten
 function totalText(items){return [...new Set(items.map(r=>r.currency))].map(currency=>fmt(items.filter(r=>r.currency===currency).reduce((s,r)=>s+Math.round(r.amount*100),0)/100)+' '+currency).join(' + ')||'0.00 THB';}
 function renderQueue(){const root=$('queue');root.innerHTML='';$('summary').innerHTML='<strong>รอโอนทั้งหมด '+rows.length+' รายการ</strong><div class="amount">'+esc(totalText(rows))+'</div><div class="muted">เบิกภายใน '+rows.filter(r=>!r.kind||r.kind==='internal').length+' รายการ • คู่ค้า '+rows.filter(r=>r.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(r=>r.kind==='dealpay').length+' รายการ</div>';for(const cid of [...new Set(rows.map(r=>r.company_id))]){const group=rows.filter(r=>r.company_id===cid),s=document.createElement('section');s.innerHTML='<h2>'+esc(group[0].company)+'</h2><p>'+group.length+' รายการโอน • '+group.reduce((n,r)=>n+r.bills,0)+' บิล • รวม '+esc(totalText(group))+'</p><div class="grid"></div>';for(const r of group){const a=document.createElement('article');a.innerHTML='<strong>'+esc(r.name)+'</strong><div>'+esc(r.bank)+' · '+esc(r.account)+'</div><div class="amount">'+fmt(r.amount)+' '+esc(r.currency)+'</div><div class="muted">'+esc(r.doc)+' • '+r.bills+' บิล</div>'+(r.hasSlip?'<p class="warn">มีสลิปอยู่แล้ว ตรวจรายการก่อนโอนซ้ำ</p>':'')+'<p class="actions"><button data-label="คัดลอกบัญชี">คัดลอกบัญชี</button><button data-label="คัดลอกยอด">คัดลอกยอด</button></p><a target="_blank" rel="noopener noreferrer" href="'+esc(r.pdf)+'">ดู PDF อนุมัติแล้ว</a>';const b=a.querySelectorAll('button');b[0].onclick=()=>copy(dg(r.account),b[0]);b[1].onclick=()=>copy(r.amount.toFixed(2),b[1]);s.querySelector('.grid').append(a);}root.append(s);}if(!rows.length)root.textContent='ไม่มีรายการรอโอน';}
 async function load(){try{const j=await api('rows');rows=j.rows;test=j.test;$('notice').textContent=test?'TEST • ห้ามโอนเงินจริง • หน้านี้ดูและคัดลอกเพื่อทดสอบเท่านั้น ไม่บันทึกจ่าย':'เลือกบริษัทให้ตรงกับบัญชีที่ใช้โอน แล้วคัดลอกบัญชีและยอดไปโอนผ่านธนาคาร';$('files').disabled=test||busy;renderQueue();renderSlips();}catch(e){$('notice').textContent=e.message;}}
-function fits(o,r){const a=dg(o.recipient_acct);return Math.round(Number(o.amount)*100)===Math.round(r.amount*100)&&String(o.currency||'').toUpperCase()===r.currency&&a.length>=4&&dg(r.account).endsWith(a);}
-function renderSlips(){const root=$('slips');root.innerHTML='';for(const s of slips){const el=document.createElement('div');el.className='slip';el.innerHTML='<img src="'+esc(s.url)+'"><div><strong>'+esc(s.name)+'</strong><p>'+esc(s.error|| (s.done?'แนบสำเร็จแล้ว':s.draft?fmt(s.draft.ocr.amount)+' '+s.draft.ocr.currency+' · '+s.draft.ocr.recipient_name+' · '+s.draft.ocr.recipient_acct:'รออ่านสลิป'))+'</p></div>';const box=el.lastChild;if(s.draft&&!s.done){const cs=document.createElement('select');cs.innerHTML='<option value="">เลือกบริษัทผู้จ่าย</option>'+[...new Set(rows.map(r=>r.company_id))].map(id=>'<option value="'+esc(id)+'">'+esc(rows.find(r=>r.company_id===id).company)+'</option>').join('');cs.value=s.company||'';cs.disabled=busy;cs.onchange=()=>{s.company=cs.value;s.id='';renderSlips();};box.append(cs);const choices=rows.filter(r=>r.company_id===s.company&&!r.hasSlip&&fits(s.draft.ocr,r));const rs=document.createElement('select');rs.innerHTML='<option value="">'+(choices.length?'เลือกรายการที่โอน':'ไม่พบคู่ที่ยอด/บัญชีตรง')+'</option>'+choices.map(r=>'<option value="'+esc(r.id)+'">'+esc(r.doc+' · '+r.name+' · '+fmt(r.amount))+'</option>').join('');if(!s.id&&choices.length===1)s.id=choices[0].id;rs.value=s.id||'';rs.disabled=busy;rs.onchange=()=>{s.id=rs.value;updateCommit();};box.append(rs);}root.append(el);}updateCommit();}
+${accountFits.toString()}
+${bankCode.toString()}
+${payerCompany.toString()}
+${slipFits.toString()}
+${slipChoices.toString()}
+function renderSlips(){
+ const root=$('slips');root.innerHTML='';
+ for(const s of slips){
+  const el=document.createElement('div');el.className='slip';
+  el.innerHTML=(s.url?'<img src="'+esc(s.url)+'">':'<div></div>')+'<div><strong>'+esc(s.name)+'</strong><p>'+esc(s.error||(s.done?'แนบสำเร็จ • รายการสำเร็จแล้ว':s.draft?fmt(s.draft.ocr.amount)+' '+s.draft.ocr.currency+' · '+s.draft.ocr.recipient_name+' · '+(s.draft.ocr.recipient_acct_mask||s.draft.ocr.recipient_acct):'รออ่านสลิป'))+'</p></div>';
+  const box=el.lastChild;
+  if(s.draft&&!s.done){
+   const o=s.draft.ocr,detected=payerCompany(o),all=slipChoices(o,rows,'');
+   if(!s.company&&!s.manualCompany)s.company=detected||(all.length===1?all[0].company_id:'');
+   const cs=document.createElement('select');cs.setAttribute('aria-label','บริษัทผู้จ่าย');
+   cs.innerHTML='<option value="">เลือกบริษัทผู้จ่าย</option>'+[...new Set(rows.map(r=>r.company_id))].map(id=>'<option value="'+esc(id)+'">'+esc(rows.find(r=>r.company_id===id).company)+'</option>').join('');
+   cs.value=s.company||'';cs.disabled=busy||!!detected;
+   cs.onchange=()=>{s.company=cs.value;s.manualCompany=true;s.id='';renderSlips();};box.append(cs);
+   const choices=s.company?slipChoices(o,rows,s.company):[];
+   if(!choices.some(r=>r.id===s.id))s.id='';
+   if(!s.id&&choices.length===1&&!s.error)s.id=choices[0].id;
+   const rs=document.createElement('select');rs.setAttribute('aria-label','รายการที่โอน');
+   rs.innerHTML='<option value="">'+(!s.company?'เลือกบริษัทผู้จ่ายก่อน':choices.length>1?'พบหลายรายการ กรุณาเลือก':choices.length?'เลือกรายการที่โอน':'ไม่พบคู่ที่ยอด บัญชี และธนาคารตรง')+'</option>'+choices.map(r=>'<option value="'+esc(r.id)+'">'+esc(r.doc+' · '+r.name+' · '+fmt(r.amount))+'</option>').join('');
+   rs.value=s.id||'';rs.disabled=busy;rs.onchange=()=>{s.id=rs.value;updateCommit();};box.append(rs);
+   const info=document.createElement('p');info.className=s.id?'ok':'muted';
+   info.textContent=s.id?'จับคู่แล้ว • ตรวจชื่อ บริษัท ยอด และบัญชีก่อนยืนยัน':detected?'อ่านบริษัทผู้จ่ายได้จากสลิป':'ยังระบุบริษัทผู้จ่ายไม่ได้';
+   if(!choices.length&&s.company){const near=rows.filter(r=>!r.hasSlip&&r.company_id===s.company&&Math.round(r.amount*100)===Math.round(Number(o.amount)*100)&&accountFits(o.recipient_acct_mask||o.recipient_acct,r.account));if(near.length)info.textContent='บัญชีและยอดตรง แต่ธนาคารไม่ตรง: สลิป '+o.recipient_bank+' / รายการ '+near.map(r=>r.bank).join(', ')+' — กรุณาตรวจข้อมูล';}
+   box.append(info);
+   if(s.error){const retry=document.createElement('button');retry.textContent='อ่านสลิปนี้ใหม่';retry.disabled=busy;retry.onclick=async()=>{busy=true;renderSlips();try{const j=await api('reread',{draft:s.draft.id});s.draft=j.draft;s.url=j.preview;s.error='';}catch(e){s.error=e.message;}busy=false;renderSlips();};box.append(retry);}
+  }
+  root.append(el);
+ }
+ updateCommit();
+}
+async function resume(){
+ if(test||busy)return;busy=true;$('files').disabled=true;
+ try{const j=await api('resume');let i=0;for(const d of j.drafts){
+  if(slips.some(s=>s.draft?.id===d.id))continue;
+  const s={draft:d,name:d.filename||'สลิป '+d.ref};slips.push(s);$('progress').textContent='กู้คืนและอ่านสลิปเดิม '+(++i)+' / '+j.drafts.length+' ใบ…';
+  try{const r=await api('reread',{draft:d.id});s.draft=r.draft;s.url=r.preview;}catch(e){s.error=e.message;}
+  renderSlips();
+ }$('progress').textContent='กู้คืนสลิป '+j.drafts.length+' ใบ • ตรวจคู่รายการแล้วกดยืนยันแนบทั้งหมด';
+ }catch(e){$('progress').textContent='กู้คืนสลิปไม่สำเร็จ: '+e.message;}
+ busy=false;$('files').disabled=false;renderSlips();
+}
 function updateCommit(){const ready=slips.filter(s=>s.draft&&s.id&&s.company&&!s.done&&!s.error);$('commit').disabled=busy||test||!ready.length;$('commit').textContent='ยืนยันแนบทั้งหมด ('+ready.length+' รายการ)';}
 async function imageData(file){if(file.size>20*1024*1024)throw Error('ไฟล์ใหญ่เกิน 20 MB');const url=URL.createObjectURL(file),im=new Image();im.src=url;await im.decode();const scale=Math.min(1,1800/Math.max(im.width,im.height)),c=document.createElement('canvas');c.width=Math.round(im.width*scale);c.height=Math.round(im.height*scale);c.getContext('2d').drawImage(im,0,0,c.width,c.height);const data=c.toDataURL('image/jpeg',.9);URL.revokeObjectURL(url);return data;}
-async function add(files){if(test||busy)return;if(slips.length+files.length>50){alert('อัปโหลดได้สูงสุด 50 ใบต่อชุด');return;}busy=true;$('files').disabled=true;updateCommit();for(const f of files){const s={name:f.name};slips.push(s);try{s.url=await imageData(f);renderSlips();$('progress').textContent='อ่านสลิป '+slips.length+' ใบ…';const j=await api('prepare',{image:s.url.split(',')[1],mime:'image/jpeg',filename:f.name});if(slips.some(x=>x!==s&&x.draft&&(x.draft.hash===j.draft.hash||x.draft.ref===j.draft.ref)))throw Error('สลิปซ้ำในชุดนี้');s.draft=j.draft;}catch(e){s.error=e.message;}renderSlips();}busy=false;$('files').disabled=false;$('progress').textContent='อ่านเสร็จ เลือกบริษัทผู้จ่ายของแต่ละสลิป แล้วตรวจคู่รายการ';renderSlips();}
+async function add(files){if(test||busy)return;if(slips.length+files.length>50){alert('อัปโหลดได้สูงสุด 50 ใบต่อชุด');return;}busy=true;$('files').disabled=true;updateCommit();for(const f of files){const s={name:f.name};slips.push(s);try{s.url=await imageData(f);renderSlips();$('progress').textContent='อ่านสลิป '+slips.length+' ใบ…';const j=await api('prepare',{image:s.url.split(',')[1],mime:'image/jpeg',filename:f.name});if(slips.some(x=>x!==s&&x.draft&&(x.draft.hash===j.draft.hash||x.draft.ref===j.draft.ref)))throw Error('สลิปซ้ำในชุดนี้');s.draft=j.draft;}catch(e){s.error=e.message;}renderSlips();}busy=false;$('files').disabled=false;$('progress').textContent='อ่านเสร็จ ตรวจบริษัทผู้จ่ายและคู่รายการก่อนยืนยัน';renderSlips();}
 $('files').onchange=e=>add([...e.target.files]);$('drop').ondragover=e=>e.preventDefault();$('drop').ondrop=e=>{e.preventDefault();add([...e.dataTransfer.files]);};$('refresh').onclick=()=>{if(!busy)load();};$('uploadJump').onclick=()=>$('upload').scrollIntoView({behavior:'smooth'});
-$('commit').onclick=async()=>{const selected=slips.filter(s=>s.draft&&s.id&&s.company&&!s.done&&!s.error);if(new Set(selected.map(s=>s.id)).size!==selected.length){alert('มีหลายสลิปเลือกใบสรุปเดียวกัน กรุณาตรวจใหม่');return;}if(!confirm('โอนเงินจริงและตรวจบริษัท/บัญชี/ยอดตรงแล้ว ยืนยันแนบ '+selected.length+' รายการ?'))return;busy=true;renderSlips();let ok=0,fail=0;for(const s of selected){try{const j=await api('commit',{pairs:[{draft:s.draft.id,id:s.id,company:s.company}]}),r=j.results[0];if(!r.ok)throw Error(r.error);s.done=true;ok++;}catch(e){s.error=e.message;fail++;}$('result').textContent='แนบสำเร็จ '+ok+' รายการ • ไม่สำเร็จ '+fail+' รายการ';}busy=false;await load();};load();
+$('commit').onclick=async()=>{const selected=slips.filter(s=>s.draft&&s.id&&s.company&&!s.done&&!s.error);if(new Set(selected.map(s=>s.id)).size!==selected.length){alert('มีหลายสลิปเลือกใบสรุปเดียวกัน กรุณาตรวจใหม่');return;}if(!confirm('โอนเงินจริงและตรวจบริษัท/บัญชี/ยอดตรงแล้ว ยืนยันแนบ '+selected.length+' รายการ?'))return;busy=true;renderSlips();let ok=0,fail=0;for(const s of selected){try{const j=await api('commit',{pairs:[{draft:s.draft.id,id:s.id,company:s.company}]}),r=j.results[0];if(!r.ok)throw Error(r.error);s.done=true;ok++;}catch(e){s.error=e.message;fail++;}$('result').textContent='แนบสำเร็จ '+ok+' รายการ • ไม่สำเร็จ '+fail+' รายการ';}busy=false;await load();};(async()=>{await load();await resume();})();
 </script></html>`;}

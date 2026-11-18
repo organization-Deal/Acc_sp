@@ -59,7 +59,8 @@ export async function api(env,path,method='GET',body){
   if(response.ok&&result.code===0)return result.data;
   const e=Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));e.code=result.code;e.status=response.status;
   // Reads and exact card replacements can retry here. Decisions retry through the durable queue and revalidate.
-  if(['GET','PATCH'].includes(method)&&rateLimited(e)&&attempt<2){await new Promise(resolve=>setTimeout(resolve,(attempt+1)*2000));continue;}
+  const retryableRead=method==='GET'&&(result.code===1255001||[502,503,504].includes(response.status));
+  if((['GET','PATCH'].includes(method)&&rateLimited(e)||retryableRead)&&attempt<2){await new Promise(resolve=>setTimeout(resolve,(attempt+1)*2000));continue;}
   throw e;
  }
 }

@@ -16,23 +16,23 @@ const company='บริษัท ออมนิ แดช เพย์ วอ�
 async function externalTick(owner){let r;for(let i=0;i<4;i++)r=await poll(owner);return r;}
 function record(kind,i=0){return {record_id:'rec'+kind+i,fields:kind==='partner'?{'การเงินที่ทำเรื่องเบิก':[{id:'ou_requester',name:'Employee requester'}],'รายการเบิก':i+'PAY_','ชื่อบริษัท':company,'ชื่อบริษัทคู่ค้าผู้รับเงิน':'Vendor '+i,'ยอดโอนเงิน':188+i,'เลขบัญชีผู้รับเงิน':'12345678'+String(i).padStart(2,'0'),'ธนาคาร':'KBANK','สกุลเงิน':'Thai Baht (THB)','ชื่อรายการ':'ค่าเดินทาง','ลงบันทึกค่าใช้จ่ายใน PEAK':{link:'https://doc.peakaccount.com/expenses?emi=NDk1MTUw&eti=reference'},'เอกสารแนบ':[{file_token:'f'+i,url:'https://temporary/one'}]}:{'การเงินที่ทำเรื่องเบิก':[{id:'ou_requester',name:'Employee requester'}],'เหตุผลขอคืนเงิน':'ชำระเงินแล้วใช้ตู้ไม่ได้','Case Number':[{text:'DEAL'+i+'TH'}],'บริษัท':company,'ชื่อบัญชีผู้รับเงิน':'Customer '+i,'จำนวนเงิน':20,'เลขที่บัญชีธนาคาร':'87654321'+String(i).padStart(2,'0'),'ธนาคาร':'SCB','ประเภทตู้':'ตู้ชกมวย','ชื่อสถานที่ตั้งตู้':'Location '+i,'สลิปโอนเงินที่ใช้บริการกับตู้':[{file_token:'f'+i,url:'https://temporary/one'}]}};}
 function harness(){
- const internal=[],jobs=[],rows={partner:[],dealpay:[]},db=new Map(),cards=new Map(),writes=[],files=new Map();let serial=0,failId='',failPaidId='',failUpload=false;
+ const internal=[],jobs=[],rows={partner:[],dealpay:[]},db=new Map(),cards=new Map(),writes=[],files=new Map();let serial=0,failId='',failPaidId='',failUpload=false,failDownload=false,loseSendResponse=false;const sentUuids=new Map(),sendAttempts=[];
  const owner={env:{FINANCE_ENABLED:'true',LARK_VERIFICATION_TOKEN:'verify',WORKER_URL:'https://example.test',KV:{get:async key=>key===SIGNING_ASSET_KEY?{version:1,assets:{signature:fakeAsset,stamp:fakeAsset}}:'token'}},ctx:{storage:{get:async k=>structuredClone(db.get(k)),put:async(k,v)=>db.set(k,structuredClone(v))}}};
  owner.documentContext={expires:Date.now()+600000,companies:new Map([['ODP',{name:company,taxId:'0000000000000',address:'Example address'}]]),names:new Map([['ou_not','Not'],['ou_may','May']]),signing:new Map([['ODP',{approver:'May',signatureId:'signature',stampId:'stamp'}]])};
  const real=globalThis.fetch;
  globalThis.fetch=async(url,opt={})=>{
   const path=new URL(url).pathname,body=typeof opt.body==='string'?JSON.parse(opt.body):{};let data={};
   if(path.endsWith('/medias/upload_all')){if(failUpload){failUpload=false;return new Response(JSON.stringify({code:999,msg:'failed'}),{status:503});}assert.equal(opt.body.get('parent_type'),'bitable_file');assert.equal(opt.body.get('file').type,'application/pdf');const file='pdf_'+(files.size+1);files.set(file,await opt.body.get('file').arrayBuffer());data.file_token=file;}
-  else if(path.endsWith('/download')){const extra=JSON.parse(new URL(url).searchParams.get('extra'));assert.ok(extra.bitablePerm.tableId);assert.ok(Object.keys(extra.bitablePerm.attachments).length);return new Response(files.get(path.split('/').at(-2)));}
-  else if(path.endsWith('/fields'))data.items=Object.values(ED).map((name,i)=>({field_name:name,field_id:'fld'+i,type:17}));
-  else if(path.includes('/im/v1/messages')){if(opt.method==='POST'){data.message_id='om_'+(++serial);cards.set(data.message_id,{to:body.receive_id,card:JSON.parse(body.content)});}else cards.get(path.split('/').pop()).card=JSON.parse(body.content);}
+  else if(path.endsWith('/download')){if(failDownload){failDownload=false;return new Response('failed',{status:503});}const extra=JSON.parse(new URL(url).searchParams.get('extra'));assert.ok(extra.bitablePerm.tableId);assert.ok(Object.keys(extra.bitablePerm.attachments).length);const token=path.split('/').at(-2);return new Response(files.has(token)?files.get(token):Buffer.from(pixel,'base64'));}
+  else if(path.endsWith('/fields'))data.items=[...Object.values(ED),...new Set(Object.values(EXTERNAL_TABLES).flatMap(t=>t.attachments)),'หลักฐานการโอน'].map((name,i)=>({field_name:name,field_id:'fld'+i,type:17}));
+  else if(path.includes('/im/v1/messages')){if(opt.method==='POST'){sendAttempts.push(body.uuid);data.message_id=sentUuids.get(body.uuid);if(!data.message_id){data.message_id='om_'+(++serial);sentUuids.set(body.uuid,data.message_id);cards.set(data.message_id,{to:body.receive_id,card:JSON.parse(body.content)});}if(loseSendResponse){loseSendResponse=false;throw Error('lost response after acceptance');}}else cards.get(path.split('/').pop()).card=JSON.parse(body.content);}
   else if(path.includes(CFG.T_EMPLOYEE))data.items=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
   else if(path.includes(LEDGER))data.items=jobs.map(j=>({fields:{'ข้อมูลงาน JSON':JSON.stringify(j)}}));
   else if(path.includes(SUMMARY)){const r=internal.find(r=>path.endsWith('/'+r.record_id));if(r){if(opt.method==='PUT'){if(failPaidId===r.record_id&&body.fields['รายการสำเร็จ']){failPaidId='';return new Response(JSON.stringify({code:999,msg:'write failed'}),{status:503});}writes.push({kind:'internal',id:r.record_id,fields:body.fields});Object.assign(r.fields,body.fields);}data.record=structuredClone(r);}else data.items=structuredClone(internal);}
   else {const kind=Object.keys(EXTERNAL_TABLES).find(k=>path.includes(EXTERNAL_TABLES[k].table));assert.ok(kind,'unknown '+path);const r=rows[kind].find(r=>path.endsWith('/'+r.record_id));if(r){if(opt.method==='PUT'){if(failId===r.record_id){failId='';return new Response(JSON.stringify({code:1254290,msg:'rate limit'}));}writes.push({kind,id:r.record_id,fields:body.fields});Object.assign(r.fields,body.fields);}data.record=structuredClone(r);}else data.items=structuredClone(rows[kind]);}
   return new Response(JSON.stringify({code:0,data}));
  };
- return {owner,rows,internal,jobs,db,cards,writes,files,failPaid:id=>failPaidId=id,failUpload:()=>failUpload=true,restore:()=>globalThis.fetch=real,failNext:id=>failId=id,callback:(saved,action='accept-all',id,actor=saved.recipient)=>({header:{token:'verify',app_id:CFG.LARK_APP_ID,event_type:'card.action.trigger'},event:{operator:{open_id:actor},action:{value:{externalFinance:true,nonce:saved.nonce,action,id}}}})};
+ return {owner,rows,internal,jobs,db,cards,writes,files,sendAttempts,failDownload:()=>failDownload=true,loseSendResponse:()=>loseSendResponse=true,failPaid:id=>failPaidId=id,failUpload:()=>failUpload=true,restore:()=>globalThis.fetch=real,failNext:id=>failId=id,callback:(saved,action='accept-all',id,actor=saved.recipient)=>({header:{token:'verify',app_id:CFG.LARK_APP_ID,event_type:'card.action.trigger'},event:{operator:{open_id:actor},action:{value:{externalFinance:true,nonce:saved.nonce,action,id}}}})};
 }
 test('independent End User accounts are valid; PEAK company and customer evidence are required',()=>{
  for(let i=0;i<5;i++)assert.equal(externalProblem(externalRow('dealpay',record('dealpay',i))),'');
@@ -68,17 +68,17 @@ async function readyTransfer(kind,i){
  const meta={};for(const stage of ['request','approved']){const file=stage+'-'+kind+i;r.fields[ED[stage]]=[{file_token:file}];meta[stage]={file,fingerprint:hash,signature:await documentSignature(x,hash,stage),templateVersion:EXTERNAL_PDF_TEMPLATE_VERSION,signingVersion:1};}
  r.fields[ED.meta]=JSON.stringify(meta);return r;
 }
-test('one transfer summary absorbs later approvals, removes closed/changed rows, and stays reusable when empty',async()=>{
+test('new approvals notify Not with a fresh message while preserving one queue and stable portal link',async()=>{
  const h=harness();try{
   h.rows.partner.push(await readyTransfer('partner',0));await poll(h.owner);
   const key=h.db.get('external:active:transfer')[0],first=h.db.get(key);assert.equal(h.cards.size,1);
   h.rows.dealpay.push(await readyTransfer('dealpay',0));await poll(h.owner);
-  assert.deepEqual(h.db.get('external:active:transfer'),[key]);assert.equal(h.db.get(key).message,first.message);assert.equal(h.cards.size,1);
-  let text=JSON.stringify(h.cards.get(first.message).card);assert.match(text,/รอโอน 2 รายการ • รวม 208.00 THB/);assert.match(text,/คู่ค้า 1 รายการ • DEALPAY 1 รายการ/);
+  assert.deepEqual(h.db.get('external:active:transfer'),[key]);assert.notEqual(h.db.get(key).message,first.message);assert.equal(h.cards.size,2);
+  let text=JSON.stringify(h.cards.get(h.db.get(key).message).card);assert.match(text,/รอโอน 2 รายการ • รวม 208.00 THB/);assert.match(text,/คู่ค้า 1 รายการ • DEALPAY 1 รายการ/);
   assert.equal((await externalPortalAction(h.owner,{token:first.nonce,op:'rows'})).rows.length,2);
   h.rows.partner[0].fields['รายการสำเร็จ']=true;h.rows.dealpay[0].fields['จำนวนเงิน']=30;await poll(h.owner);
-  text=JSON.stringify(h.cards.get(first.message).card);assert.match(text,/รอโอน 0 รายการ/);assert.doesNotMatch(text,/Customer 0|Vendor 0/);
-  h.rows.dealpay.push(await readyTransfer('dealpay',1));await poll(h.owner);assert.equal(h.cards.size,1);assert.equal(h.db.get(key).signatures.length,1);
+  text=JSON.stringify(h.cards.get(h.db.get(key).message).card);assert.match(text,/รอโอน 0 รายการ/);assert.doesNotMatch(text,/Customer 0|Vendor 0/);
+  h.rows.dealpay.push(await readyTransfer('dealpay',1));await poll(h.owner);assert.equal(h.cards.size,3);assert.equal(h.db.get(key).signatures.length,1);await poll(h.owner);assert.equal(h.cards.size,3);
  }finally{h.restore();}
 });
 test('legacy transfer cards merge into the newest card and old links retire without financial writes',async()=>{
@@ -86,11 +86,11 @@ test('legacy transfer cards merge into the newest card and old links retire with
   h.rows.partner.push(await readyTransfer('partner',0));h.rows.dealpay.push(await readyTransfer('dealpay',0));
   for(let i=0;i<2;i++){const key='old'+i,saved={version:1,stage:'transfer',recipient:'ou_not',nonce:'nonce'+i,created:Date.now()-10000+i,message:'old-message'+i,signatures:[]};h.db.set(key,saved);h.db.set('external:nonce:'+saved.nonce,key);h.cards.set(saved.message,{to:'ou_not',card:{}});}
   h.db.set('external:active:transfer',['old0','old1']);const audits=Object.values(h.rows).flat().map(r=>r.fields[EF.audit]);
-  await poll(h.owner);assert.deepEqual(h.db.get('external:active:transfer'),['old1']);assert.equal(h.cards.size,2);assert.equal(h.db.get('old1').signatures.length,2);assert.equal(h.db.get('old0').retired,true);
+  await poll(h.owner);assert.deepEqual(h.db.get('external:active:transfer'),['old1']);assert.equal(h.cards.size,3);assert.equal(h.db.get('old1').signatures.length,2);assert.equal(h.db.get('old0').retired,true);
   assert.match(JSON.stringify(h.cards.get('old-message0').card),/รวมรายการรอโอนแล้ว/);assert.deepEqual(Object.values(h.rows).flat().map(r=>r.fields[EF.audit]),audits);
   await assert.rejects(()=>externalPortalAuth(h.owner,'nonce0'),/หมดอายุ/);await externalPortalAuth(h.owner,'nonce1');
   const current=h.db.get('old1');current.created=Date.now()-8*86400000;h.db.set('old1',current);await poll(h.owner);
-  assert.equal(h.cards.size,3);assert.equal(h.db.get('external:active:transfer').length,1);assert.equal(h.db.get('old1').retired,true);
+  assert.equal(h.cards.size,4);assert.equal(h.db.get('external:active:transfer').length,1);assert.equal(h.db.get('old1').retired,true);
  }finally{h.restore();}
 });
 test('large queues remain one bounded card with exact totals and every row in the transfer portal',async()=>{
@@ -141,7 +141,7 @@ test('legacy matcher cannot bypass external review or mark an external payment c
 test('draft PDFs separate requester from payee, retain stable identity, and do not trigger approval',async()=>{
  const h=harness();try{const r=record('dealpay');r.fields[EF.status]='รอบัญชีเช็ก';h.rows.dealpay.push(r);await poll(h.owner);
  assert.equal(h.files.size,1);assert.equal(h.cards.size,0);assert.equal(await externalStage(externalRow('dealpay',r)),'accounting');
- const original=documentMeta(externalRow('dealpay',r)),number=r.fields[ED.number],pdf=await PDFDocument.load([...h.files.values()][0]);assert.match(pdf.getTitle(),/ใบขออนุมัติคืนเงินลูกค้า/);assert.equal(pdf.getPageCount(),1);
+ const original=documentMeta(externalRow('dealpay',r)),number=r.fields[ED.number],pdf=await PDFDocument.load([...h.files.values()][0]);assert.match(pdf.getTitle(),/ใบขออนุมัติคืนเงินลูกค้า/);assert.equal(pdf.getPageCount(),2);
  const job=[...h.db.values()].find(x=>x?.model);assert.equal(job.model.requester,'Employee requester');assert.equal(job.model.payee,'Customer 0');assert.equal(job.model.may,null);
  r.fields['Case Number']=[{text:'NEW-RANDOM-NUMBER'}];await poll(h.owner);assert.equal(h.files.size,1);assert.equal(r.fields[ED.number],number);
  r.fields['จำนวนเงิน']=30;await poll(h.owner);assert.equal(h.files.size,2);assert.equal(r.fields[ED.number],number);assert.equal(r.fields[ED.history][0].file_token,original.request.file);
@@ -228,5 +228,37 @@ test('mixed slips attach to each source before automatic completion, with shared
   for(const t of targets){assert.equal(t.r.fields['รายการสำเร็จ'],true);assert.ok(t.r.fields['หลักฐานการโอน']?.length);const writes=h.writes.filter(w=>w.id===t.r.record_id);assert.ok(writes.findIndex(w=>w.fields['รายการสำเร็จ']===true)>writes.findIndex(w=>w.fields['หลักฐานการโอน']));}
   assert.equal((await run([{...targets[0],draft:targets[2].draft}])).results[0].ok,false);
   await poll(h.owner,{unified:true});assert.match(JSON.stringify(h.cards.get(saved.message).card),/รอโอน 0 รายการ/);
+ }finally{h.restore();}
+});
+
+
+test('notification retries recover an accepted POST with the same UUID and never alert on unchanged polls',async()=>{
+ const h=harness();try{
+  h.rows.partner.push(await readyTransfer('partner',0));h.loseSendResponse();
+  await assert.rejects(()=>poll(h.owner),/lost response/);assert.equal(h.cards.size,1);
+  const key=h.db.get('external:transfer-summary'),pending=h.db.get(key);assert.ok(pending.notification);assert.equal(pending.message,undefined);
+  h.rows.dealpay.push(await readyTransfer('dealpay',0));await poll(h.owner);
+  assert.equal(h.cards.size,1);assert.equal(h.sendAttempts[0],h.sendAttempts[1]);assert.ok(h.db.get(key).message);assert.equal(h.db.get(key).notification,undefined);
+  assert.match(JSON.stringify(h.cards.get(h.db.get(key).message).card),/รอโอน 2 รายการ/);
+  await poll(h.owner);assert.equal(h.cards.size,1);assert.equal(h.sendAttempts.length,2);
+ }finally{h.restore();}
+});
+
+test('an unreadable original attachment prevents publishing an incomplete PDF and retries safely',async()=>{
+ const h=harness();try{
+  const r=record('partner');r.fields[EF.request]=true;h.rows.partner.push(r);h.failDownload();
+  await poll(h.owner);assert.equal(h.files.size,0);assert.equal(h.cards.size,0);assert.equal(r.fields[EF.audit],undefined);assert.match(r.fields[ED.status],/ไฟล์แนบ/);
+  await poll(h.owner);assert.equal(h.files.size,1);assert.equal(h.cards.size,1);
+  const pdf=await PDFDocument.load([...h.files.values()][0]);assert.equal(pdf.getPageCount(),2);
+ }finally{h.restore();}
+});
+
+test('portal and transfer card expose actual submitted purposes, bounded to 100 characters',async()=>{
+ const h=harness();try{
+  const {r,j}=readyInternal();j.items[0].detail='ค่าน้ำมัน ไปดูตู้ชกมวย';h.internal.push(r);h.jobs.push(j);
+  h.rows.partner.push(await readyTransfer('partner',0));await poll(h.owner,{unified:true});const saved=h.db.get(h.db.get('external:transfer-summary'));
+  const result=await unifiedPortalAction(h.owner,{token:saved.nonce,op:'rows'});
+  assert.equal(result.rows.find(x=>x.kind==='internal').summary,'ค่าน้ำมัน ไปดูตู้ชกมวย');assert.equal(result.rows.find(x=>x.kind==='partner').summary,'ค่าเดินทาง');
+  assert.ok(result.rows.every(x=>x.summary.length<=100));assert.match(JSON.stringify(h.cards.get(saved.message).card),/ค่าน้ำมัน ไปดูตู้ชกมวย/);
  }finally{h.restore();}
 });

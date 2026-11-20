@@ -1,8 +1,9 @@
 import {PDFDocument,PDFName,PDFHexString,PDFOperator,rgb,beginText,endText,setFontAndSize,setTextMatrix,showText,setFillingRgbColor} from 'pdf-lib';
 import fontkit from '@pdf-lib/fontkit';
 import {SARABUN_BASE64} from './sarabun-font.js';
+import {appendPdfAttachments} from './attachment-pdf.js';
 
-export const EXTERNAL_PDF_TEMPLATE_VERSION=3;
+export const EXTERNAL_PDF_TEMPLATE_VERSION=4;
 
 const bytes=Uint8Array.from(atob(SARABUN_BASE64),c=>c.charCodeAt(0));
 const face=fontkit.create(bytes);
@@ -60,5 +61,6 @@ export async function renderExternalPdf(m){
  }else page.drawRectangle({x:centres[1]-42,y:top-156,width:84,height:62,borderWidth:.4,borderColor:rgb(.8,.83,.85)});
  centre('ตราประทับบริษัท',centres[1],top-169,8,grey);y=top-180;
  for(let i=0;i<pages.length;i++){page=pages[i];key=page.node.newFontDictionary(font.name,font.ref);line('เอกสารขออนุมัติภายใน - ไม่ใช่ใบเสร็จรับเงินหรือใบกำกับภาษี',left,38,8,grey);line(m.number+' | '+(i+1)+'/'+pages.length,left,24,7,grey);}
+ await appendPdfAttachments(doc,m.attachments||[]);
  return doc.save();
 }

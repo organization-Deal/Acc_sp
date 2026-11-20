@@ -3,6 +3,7 @@ import {larkToken} from './lark.js';
 import {CFG} from './config.js';
 import {renderExternalPdf,EXTERNAL_PDF_TEMPLATE_VERSION} from './external-pdf.js';
 import {prepareSigningProfile,signingImages,SIGNING_VERSION} from './external-signing.js';
+import {downloadBitableAttachment} from './attachment-pdf.js';
 
 export const ED={number:'เลขเอกสารขอจ่าย',request:'ใบขอจ่าย PDF',approved:'PDF อนุมัติแล้ว',paid:'PDF ปิดรายการ',history:'ประวัติเอกสาร PDF',status:'สถานะเอกสาร',meta:'ข้อมูลเอกสาร (ระบบ)'};
 export const documentMeta=x=>{try{return JSON.parse(textOf(x.r.fields[ED.meta]))||{};}catch{return {};}};
@@ -41,7 +42,17 @@ export async function ensureExternalDocument(owner,x,stage,services){
   model.signing=signing;
   job={version:1,templateVersion:EXTERNAL_PDF_TEMPLATE_VERSION,signature,fingerprint:hash,model,filename:sequence.number+'-v'+sequence.revision+'-'+stage+'.pdf'};await store.put(key,job);
  }
- if(!job.file){const model={...job.model,...(job.model.signing?{signing:{...job.model.signing,...await signingImages(owner,job.model.signing)}}:{})};const pdf=await renderExternalPdf(model);job.file=await uploadExternalPdf(owner.env,pdf,job.filename);await store.put(key,job);}
+ if(!job.file){
+  const attachments=[],seen=new Set(),sources=[...x.evidence];
+  if(stage==='paid')sources.push(['หลักฐานการโอน',(x.r.fields['หลักฐานการโอน']||[]).map(a=>a.file_token)]);
+  for(const [field,tokens] of sources)for(const token of tokens){
+   if(seen.has(token))continue;seen.add(token);
+   const a=(x.r.fields[field]||[]).find(a=>a.file_token===token);
+   attachments.push(await downloadBitableAttachment(owner,{table:x.table,record:x.r.record_id,field,token,name:a?.name||token}));
+  }
+  const model={...job.model,attachments,...(job.model.signing?{signing:{...job.model.signing,...await signingImages(owner,job.model.signing)}}:{})};
+  const pdf=await renderExternalPdf(model);job.file=await uploadExternalPdf(owner.env,pdf,job.filename);await store.put(key,job);
+ }
  // Re-read after expensive rendering/upload. Never publish an approved document for changed data.
  const current=await services.fresh(x),currentHash=await services.fingerprint(current);
  if(currentHash!==hash||await documentSignature(current,currentHash,stage)!==signature)throw Error('ข้อมูลเปลี่ยนระหว่างสร้าง PDF จะสร้างใหม่ในรอบถัดไป');

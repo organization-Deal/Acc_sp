@@ -6,8 +6,10 @@ import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
 import {transferPage,portalAuth,portalAction,internalTransferRows,slipFits} from './transfer.js';
+import {expenseSummary} from './expense-summary.js';
+import {internalTransferDocument} from './internal-transfer-document.js';
 
-export const EXTERNAL_FLOW_VERSION='external-flow-v2-documents';
+export const EXTERNAL_FLOW_VERSION='external-flow-v3-transfer-evidence';
 export const EF={request:'บัญชีเช็กแล้ว → ส่งให้นอต',status:'สถานะงาน',not:'นอตตรวจผ่าน',may:'เมย์อนุมัติ',delivery:'หลักฐานส่งให้นอต',audit:'ข้อมูล Flow (ระบบ)'};
 export const EXTERNAL_TABLES={
  partner:{table:'tbldczVhrFWfJ5ze',label:'คู่ค้า',doc:'รายการเบิก',company:'ชื่อบริษัท',name:'ชื่อบริษัทคู่ค้าผู้รับเงิน',amount:'ยอดโอนเงิน',account:'เลขบัญชีผู้รับเงิน',detail:'ชื่อรายการ',attachments:['เอกสารแนบ']},
@@ -104,6 +106,7 @@ async function eRender(saved,all){
  return {card:eCard(saved.stage==='not'?'คู่ค้า / DEALPAY • รอนอตตรวจ':'คู่ค้า / DEALPAY • รอเมย์อนุมัติ',elements,saved.stage==='not'?'blue':'purple'),pending};
 }
 const eTransferUrl=(saved,env)=>(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-transfers&k='+encodeURIComponent(saved.nonce);
+const transferSummary=x=>x.kind==='internal'?x.summary:expenseSummary([x.detail],x.note);
 const transferLabel=kind=>kind==='internal'?'เบิกภายใน':EXTERNAL_TABLES[kind].label;
 const transferTotals=rows=>[...new Set(rows.map(x=>x.currency))].map(currency=>eMoney(rows.filter(x=>x.currency===currency).reduce((s,x)=>s+Math.round(x.amount*100),0)/100)+' '+currency).join(' + ')||'0.00 THB';
 export function externalTransferCard(saved,rows,env){
@@ -113,7 +116,7 @@ export function externalTransferCard(saved,rows,env){
  for(const group of groups.values())elements.push(ePara('**'+eMd(group[0].company.name)+'**\n'+group.length+' รายการ • '+transferTotals(group)));
  let shown=0;
  for(const group of groups.values())for(const x of group){
-  const item=ePara('**'+(shown+1)+'. '+eMd(x.name)+' • '+eMoney(x.amount)+' '+x.currency+'**\n'+x.company.id+' • '+eMd(transferLabel(x.kind))+' • '+eMd(textOf(x.r.fields[ED.number])||x.doc)+'\n'+eMd(x.bank)+' • '+eMd(x.account)+'\n[PDF อนุมัติแล้ว]('+(x.pdf||eDocumentUrl(x,saved.nonce,'approved',env))+') | [เปิดรายการ / หลักฐาน]('+eUrl(x)+')'+(x.r.fields['หลักฐานการโอน']?.length?'\n⚠️ มีหลักฐานโอนแล้ว ตรวจสอบก่อนโอนซ้ำ':''));
+  const item=ePara('**'+(shown+1)+'. '+eMd(x.name)+' • '+eMoney(x.amount)+' '+x.currency+'**\n'+x.company.id+' • '+eMd(transferLabel(x.kind))+' • '+eMd(textOf(x.r.fields[ED.number])||x.doc)+'\n'+eMd(x.bank)+' • '+eMd(x.account)+'\nรายการ: '+eMd(transferSummary(x))+'\n[PDF รวมไฟล์แนบ]('+(x.pdf||eDocumentUrl(x,saved.nonce,'approved',env))+') | [เปิดรายการ / หลักฐาน]('+eUrl(x)+')'+(x.r.fields['หลักฐานการโอน']?.length?'\n⚠️ มีหลักฐานโอนแล้ว ตรวจสอบก่อนโอนซ้ำ':''));
   // Keep one card even for a large queue; the portal always contains every current row.
   if(shown>=30||new TextEncoder().encode(JSON.stringify([...elements,item])).length>23000)continue;
   elements.push(item);shown++;
@@ -134,12 +137,30 @@ async function eTransferSummary(owner,all,recipient,unified=false){
  let current=valid.find(x=>x.key===pointer)||valid.sort((a,b)=>b.saved.created-a.saved.created)[0],sends=0;
  if(!current&&rows.length){const nonce=crypto.randomUUID();current={key:'external:card:transfer:summary:'+nonce,saved:{version:1,stage:'transfer',recipient,nonce,created:Date.now()}};}
  if(current){
-  const {key,saved}=current;saved.summary=true;saved.unified=unified;saved.signatures=await Promise.all(rows.map(async x=>({id:x.id,fingerprint:x.kind==='internal'?await fingerprint(x.r,x.source.j):await externalFingerprint(x),epoch:x.audit?.epoch})));
+  const {key,saved}=current;saved.summary=true;saved.unified=unified;saved.signatures=await Promise.all(rows.map(async x=>({id:x.id,fingerprint:x.kind==='internal'?await fingerprint(x.r,x.source.j):await externalFingerprint(x),epoch:x.kind==='internal'?x.source.j.approvedPdf:x.audit?.epoch})));
   // Persist the same nonce before delivery, so a retry cannot create another summary.
   await store.put(key,saved);await store.put('external:nonce:'+saved.nonce,key);await store.put('external:transfer-summary',key);
+  for(const row of rows)if(row.kind==='internal')row.pdf=eDocumentUrl({...row,id:'internal:'+row.id},saved.nonce,'approved',owner.env);
   const card=externalTransferCard(saved,rows,owner.env);
-  if(!saved.message){saved.message=await eSend(owner.env,recipient,card,key);saved.sentAt=Date.now();saved.renderHash=await digest(card);await store.put(key,saved);sends++;}
-  else await ePatch(owner,key,saved,card);
+  // New approvals must produce a new message notification, not only edit an old card.
+  // Keep an outbox key across retries, including response loss after Lark accepts POST.
+  const identities=await Promise.all(saved.signatures.map(s=>digest([s.id,s.fingerprint,s.epoch])));
+  const known=new Set(saved.notifiedIdentities||[]),added=identities.filter(id=>!known.has(id));
+  if(rows.length&&(!saved.message||added.length)){
+   if(!saved.notification){saved.notification={key:key+':delivery:'+crypto.randomUUID(),identities};await store.put(key,saved);}
+   const oldMessage=saved.message;
+   const message=await eSend(owner.env,recipient,card,saved.notification.key);
+   saved.message=message;saved.sentAt=Date.now();saved.renderHash=await digest(card);
+   saved.notifiedIdentities=saved.notification.identities||[];delete saved.notification;await store.put(key,saved);sends++;
+   // A lost POST response may be deduplicated to the earlier payload. Refresh it
+   // before marking any arrivals since that attempt as successfully delivered.
+   saved.renderHash='';await ePatch(owner,key,saved,card);
+   saved.notifiedIdentities=identities;await store.put(key,saved);
+   if(oldMessage&&oldMessage!==message){try{await api(owner.env,'im/v1/messages/'+encodeURIComponent(oldMessage),'PATCH',{content:JSON.stringify(eCard('รายการรอโอนมีการอัปเดตแล้ว',[ePara('ใช้การ์ดล่าสุด หรือ[เปิดรายการรอโอนทั้งหมด]('+eTransferUrl(saved,owner.env)+')')],'grey'))});}catch(e){console.log('TRANSFER_OLD_CARD_PATCH_RETRY',e.message);}}
+  }else{
+   saved.notifiedIdentities=identities;await store.put(key,saved);
+   await ePatch(owner,key,saved,card);
+  }
  }
  for(const {key,saved} of existing){
   if(key===current?.key)continue;
@@ -191,7 +212,8 @@ export async function externalTick(owner,{unified=false}={}){
   const status=stage==='changed'?'ข้อมูลรายการเปลี่ยน • ให้บัญชีตรวจใหม่':stage==='blocked'?'ข้อมูลไม่ครบ • '+externalProblem(x):eStatus[stage];
   if(status&&textOf(x.r.fields[EF.status])!==status)await eWrite(owner.env,x,{[EF.status]:status,...(['changed','blocked'].includes(stage)?{[EF.not]:false,[EF.may]:false}:{})});
  }
- let sends=0;const counts={not:0,may:0,transfer:0};
+ const transfer=await eTransferSummary(owner,all,recipients.not,unified);
+ let sends=transfer.sends;const counts={not:0,may:0,transfer:transfer.count};
  for(const stage of ['not','may']){
   const recipient=stage==='may'?recipients.may:recipients.not,active=[],covered=new Set();
   for(const key of await owner.ctx.storage.get('external:active:'+stage)||[]){
@@ -212,7 +234,6 @@ export async function externalTick(owner,{unified=false}={}){
   }
   await owner.ctx.storage.put('external:active:'+stage,active);
  }
- const transfer=await eTransferSummary(owner,all,recipients.not,unified);counts.transfer=transfer.count;sends+=transfer.sends;
  const transferCards=transfer.cards;await owner.ctx.storage.put('external:lastPoll',{at:Date.now(),counts,sends,transferCards});console.log('EXTERNAL_FINANCE_POLL',JSON.stringify({counts,sends,transferCards}));return {ok:true,counts,sends,transferCards};
 }
 export async function externalCallback(owner,b){
@@ -232,7 +253,7 @@ export async function externalCallback(owner,b){
    await eStateWrite(owner.env,x,a);Object.assign(original,x);delete saved.errors[x.id];results.push({id:x.id,ok:true});
   }catch(e){saved.errors[sig.id]=String(e.message||e);results.push({id:sig.id,ok:false,error:saved.errors[sig.id]});}
  }
- await owner.ctx.storage.put(key,saved);await ePatch(owner,key,saved,(await eRender(saved,all)).card);
+ await owner.ctx.storage.put(key,saved);try{await ePatch(owner,key,saved,(await eRender(saved,all)).card);}catch(e){console.log('EXTERNAL_DECISION_CARD_PATCH_RETRY',e.message);}
  // Retry is an explicit new click on remaining items. Successful rows have advanced and cannot be approved twice.
  console.log('EXTERNAL_FINANCE_DECISION',JSON.stringify(results));return {ok:results.every(r=>r.ok||r.already),results};
 }
@@ -240,7 +261,7 @@ export async function externalPortalAuth(owner,token){
  const key=await owner.ctx.storage.get('external:nonce:'+token),saved=key&&await owner.ctx.storage.get(key);
  if(!saved||saved.retired||saved.stage!=='transfer'||Date.now()-saved.created>7*86400000||saved.recipient!==(await people(owner.env)).not)throw Error('ลิงก์หมดอายุ เปิดการ์ดรอโอนล่าสุด');return saved;
 }
-const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+(textOf(x.r.fields[ED.number])||x.doc),company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,amount:x.amount,currency:x.currency,bills:1,pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
+const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+(textOf(x.r.fields[ED.number])||x.doc),company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,amount:x.amount,currency:x.currency,bills:1,summary:expenseSummary([x.detail],x.note),pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
 export function externalSlipFits(o,x){return slipFits(o,{...x,company_id:x.company.id});}
 export async function externalPortalAction(owner,b,session){
  const saved=session||await externalPortalAuth(owner,b.token),{ctx,env}=owner;
@@ -290,7 +311,7 @@ export async function unifiedPortalAction(owner,b){
  if(['resume','reread','reference'].includes(b.op))return portalAction(owner,b,saved);
  if(b.op==='rows'){
   const [internal,external]=await Promise.all([internalTransferRows(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);
-  const rows=[...internal.map(({source,...x})=>({...x,doc:'เบิกภายใน • '+x.doc})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];
+  const rows=[...internal.map(({source,...x})=>({...x,doc:'เบิกภายใน • '+x.doc,originalPdf:x.pdf,pdf:eDocumentUrl({id:'internal:'+x.id},saved.nonce,'approved',owner.env)})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];
   rows.sort((a,b)=>a.company_id.localeCompare(b.company_id)||a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
   return {ok:true,test:false,rows};
  }
@@ -315,6 +336,10 @@ export async function unifiedPortalAction(owner,b){
  throw Error('คำสั่งไม่ถูกต้อง');
 }
 export async function unifiedDocumentAccess(owner,b){
+ if(String(b.id).startsWith('internal:')){
+  const saved=await unifiedPortalAuth(owner,b.k);if(saved.stage!=='transfer'||b.stage!=='approved')throw Error('ไม่มีสิทธิ์');
+  return internalTransferDocument(owner,String(b.id).slice('internal:'.length));
+ }
  if(await owner.ctx.storage.get('external:nonce:'+b.k))return externalDocumentAccess(owner,b);
  const saved=await unifiedPortalAuth(owner,b.k);if(saved.stage!=='transfer')throw Error('ไม่มีสิทธิ์');
  return externalDocumentAccess(owner,b,saved);

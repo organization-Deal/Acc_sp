@@ -70,6 +70,7 @@ export async function cfoRead(owner,b){
   if(['expenses','receipts','invoices'].includes(b.resource)){
    const resource=b.resource==='expenses'?'Expenses':b.resource==='invoices'?'Invoices':'Receipts';
    if(b.code){if(!/^[A-Za-z0-9_-]{1,80}$/.test(b.code))throw Error('เลขเอกสารไม่ถูกต้อง');path=resource+'?code='+encodeURIComponent(b.code)+'&getResult=1';}
+   else if(b.detailList==='1'&&resource!=='Receipts')path=resource+'?limit=100&page='+page+'&getResult=1';
    else path=resource+'/list?dateStart='+from+'&dateEnd='+to+'&limit=100&page='+page+'&status=0'+(resource!=='Receipts'?'&includeRemainAmount=1':'');
   }else if(b.resource==='accounts')path='PaymentMethods?limit=100&page='+page+'&getResult=1';
   else if(b.resource==='trial')path='FinancialReports/trialbalance?fromMonth='+start.replace('-','')+'&toMonth='+b.month.replace('-','')+'&isShowSubAccount=false';

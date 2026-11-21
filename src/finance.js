@@ -53,10 +53,12 @@ export async function checkedStage(r,j){
  return stage;
 }
 export async function api(env,path,method='GET',body){
+ let authRefreshed=false;
  for(let attempt=0;;attempt++){
   const response=await fetch(CFG.LARK_HOST+'/open-apis/'+path,{method,signal:AbortSignal.timeout(45000),headers:{Authorization:'Bearer '+await larkToken(env),'Content-Type':'application/json'},...(body?{body:JSON.stringify(body)}:{})});
   const result=await response.json();
   if(response.ok&&result.code===0)return result.data;
+  if(method==='GET'&&result.code===99991663&&!authRefreshed){await larkToken(env,true);authRefreshed=true;continue;}
   const e=Error('Lark '+response.status+'/'+result.code+' '+(result.msg||''));e.code=result.code;e.status=response.status;
   // Reads and exact card replacements can retry here. Decisions retry through the durable queue and revalidate.
   const retryableRead=method==='GET'&&(result.code===1255001||[502,503,504].includes(response.status));

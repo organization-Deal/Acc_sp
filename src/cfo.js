@@ -45,6 +45,9 @@ export async function cfoRead(owner,b){
    if(b.code){if(!/^[A-Za-z0-9_-]{1,80}$/.test(b.code))throw Error('เลขเอกสารไม่ถูกต้อง');path=resource+'?code='+encodeURIComponent(b.code)+'&getResult=1';}
    else path=resource+'/list?dateStart='+from+'&dateEnd='+to+'&limit=100&page='+page+'&status=0'+(resource==='Expenses'?'&includeRemainAmount=1':'');
   }else if(b.resource==='accounts')path='PaymentMethods?limit=100&page='+page+'&getResult=1';
+  else if(b.resource==='trial')path='FinancialReports/trialbalance?fromMonth='+b.month.replace('-','')+'&toMonth='+b.month.replace('-','')+'&isShowSubAccount=false';
+  else if(b.resource==='chart')path='DailyJournals/accountcode';
+  else if(b.resource==='contacts')path='Contacts/list?limit=100&page='+page;
   else if(b.resource==='ledger'){
    if(!/^\d{3,12}$/.test(b.account||''))throw Error('รหัสบัญชีไม่ถูกต้อง');
    path='FinancialReports/generalledger?fromDate='+from+'&toDate='+to+'&accountCode='+b.account+'&isShowSubAccount=true';

@@ -31,8 +31,9 @@ function detectMime(buf) {
 }
 
 // ── tenant token (cache ใน KV 90 นาที) ──
-export async function larkToken(env) {
-  const c = await env.KV.get('lark_tok');
+export async function larkToken(env,force=false) {
+  const cacheKey='lark_tok:v2:'+CFG.LARK_APP_ID;
+  const c = force?null:await env.KV.get(cacheKey);
   if (c) return c;
   const res = await fetch(CFG.LARK_HOST + '/open-apis/auth/v3/tenant_access_token/internal', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -40,7 +41,8 @@ export async function larkToken(env) {
   });
   const j = await res.json();
   const tok = j.tenant_access_token;
-  if (tok) await env.KV.put('lark_tok', tok, { expirationTtl: 5400 });
+  if(!res.ok||j.code!==0||!tok)throw Error('Lark ยืนยันแอปไม่สำเร็จ ('+String(j.code||res.status)+')');
+  await env.KV.put(cacheKey, tok, { expirationTtl: Math.max(60,Math.min(5400,Number(j.expire||7200)-120)) });
   return tok;
 }
 

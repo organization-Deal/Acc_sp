@@ -25,12 +25,26 @@ async function client(owner){
  if(String(body?.resCode)!=='200'||!body?.token)throw Error('PEAK ปฏิเสธข้อมูลเชื่อมต่อ ('+String(body?.resCode||'unknown').replace(/[^\w-]/g,'').slice(0,30)+')');
  await ctx.storage.put('cfo:peak:client',{token:body.token,until:Date.now()+23*3600000});return body.token;
 }
-async function get(owner,path,userToken){
- const {env}=owner;
+const readQueues=new WeakMap();
+async function get(owner,path,userToken,force=false){
  if(!userToken)throw Error('ยังไม่มี User Token ของบริษัท');
- const r=await fetch(BASE+path,{headers:{...await headers(env),'Client-Token':await client(owner),'User-Token':userToken},signal:AbortSignal.timeout(35000)});
- if(!r.ok)throw Error('PEAK อ่านข้อมูลไม่สำเร็จ (HTTP '+r.status+')');
- return r.json();
+ const userKey=await digest(userToken),key='cfo:read:v1:'+await digest([userKey,path]);
+ let state=readQueues.get(owner);if(!state){state={pending:new Map(),tails:new Map(),blocked:new Map()};readQueues.set(owner,state);}
+ if(state.pending.has(key))return state.pending.get(key);
+ const run=async()=>{
+  const saved=await owner.ctx.storage.get(key);if(!force&&saved&&saved.until>Date.now())return {...saved,cached:true};
+  for(let attempt=0;attempt<3;attempt++){
+   const wait=(state.blocked.get(userKey)||0)-Date.now();if(wait>15000){const error=Error('PEAK จำกัดคำขอ กรุณารอ '+Math.ceil(wait/1000)+' วินาทีแล้วอัปเดตอีกครั้ง');error.retryAfterSeconds=Math.ceil(wait/1000);throw error;}if(wait>0)await new Promise(r=>setTimeout(r,wait));
+   const r=await fetch(BASE+path,{headers:{...await headers(owner.env),'Client-Token':await client(owner),'User-Token':userToken},signal:AbortSignal.timeout(35000)});
+   if(r.status===429){let body={};try{body=await r.json();}catch{}const seconds=Math.max(1,Number(r.headers?.get('Retry-After'))||Number(body.retryAfterSeconds)||2**attempt);state.blocked.set(userKey,Date.now()+seconds*1000);if(attempt<2&&seconds<=15)continue;const error=Error('PEAK จำกัดคำขอ กรุณารอ '+Math.ceil(seconds)+' วินาทีแล้วอัปเดตอีกครั้ง');error.retryAfterSeconds=Math.ceil(seconds);throw error;}
+   if(!r.ok)throw Error('PEAK อ่านข้อมูลไม่สำเร็จ (HTTP '+r.status+')');
+   const data=await r.json(),at=new Date().toISOString(),result={data,at,until:Date.now()+5*60000};
+   if(Object.values(data).some(x=>x&&typeof x==='object'&&String(x.resCode)==='200')&&new TextEncoder().encode(JSON.stringify(result)).length<120000)await owner.ctx.storage.put(key,result);
+   return {...result,cached:false};
+  }
+ };
+ const result=(state.tails.get(userKey)||Promise.resolve()).catch(()=>{}).then(run);state.tails.set(userKey,result.catch(()=>{}));state.pending.set(key,result);
+ try{return await result;}finally{state.pending.delete(key);}
 }
 export async function cfoRead(owner,b){
  const siteKey=typeof b.token==='string'&&b.token.length>=48&&await digest(b.token)===CFO_READ_KEY_HASH;
@@ -60,11 +74,11 @@ export async function cfoRead(owner,b){
    if(!/^\d{3,12}$/.test(b.account||''))throw Error('รหัสบัญชีไม่ถูกต้อง');
    path='FinancialReports/generalledger?fromDate='+from+'&toDate='+to+'&accountCode='+b.account+'&isShowSubAccount=true';
   }else throw Error('แหล่งข้อมูลไม่รองรับ');
-  const data=await get(owner,path,companyToken);
+  const result=await get(owner,path,companyToken,b.fresh==='1'),data=result.data;
   for(const [key,field] of [['PeakExpenses','expenses'],['PeakReceipts','receipts']])for(const row of data[key]?.[field]||[]){
    if(row.documentLink&&new URL(row.documentLink).searchParams.get('emi')!==emis[company])throw Error('ข้อมูล PEAK ไม่ตรงบริษัท '+company);
   }
-  return {ok:true,company,at:new Date().toISOString(),data};
+  return {ok:true,company,at:result.at,cached:result.cached,data};
  }
  if(b.op==='lark'){
   const rows=[];let next='';
@@ -74,7 +88,7 @@ export async function cfoRead(owner,b){
  const jobs=[['expenses','Expenses/list?limit=1&page=1&status=0&includeRemainAmount=1'],['receipts','Receipts/list?limit=1&page=1&status=0'],['accounts','PaymentMethods?limit=10&page=1&getResult=1']];
  if(b.op==='inspect'){jobs.splice(0,jobs.length,['expenseDetail','Expenses?code=EXP-202601073&getResult=1'],['receiptDetail','Receipts?code=RT-20260101002&getResult=1'],['monthExpenses','Expenses/list?dateStart=20261101&dateEnd=20261121&limit=100&page=1&status=0&includeRemainAmount=1'],['monthReceipts','Receipts/list?dateStart=20261101&dateEnd=20261121&limit=100&page=1&status=0'],['accounts','PaymentMethods?limit=100&page=1&getResult=1'],['ledger','FinancialReports/generalledger?fromDate=20261101&toDate=20261121&accountCode=111201&isShowSubAccount=true']);}
  const output={ok:true,source:'PEAK',at:new Date().toISOString(),results:{}};
- for(const [name,path] of jobs){try{output.results[name]=await get(owner,path,token);}catch(e){output.results[name]={error:e.message};}}
+ for(const [name,path] of jobs){try{output.results[name]=(await get(owner,path,token)).data;}catch(e){output.results[name]={error:e.message};}}
  try{output.results.larkExpense=(await api(owner.env,recordsPath(CFG.T_EXPENSE)+'?page_size=1'));}catch(e){output.results.larkExpense={error:e.message};}
  return output;
 }

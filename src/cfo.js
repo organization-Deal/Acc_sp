@@ -47,16 +47,18 @@ async function get(owner,path,userToken,force=false){
  try{return await result;}finally{state.pending.delete(key);}
 }
 export async function cfoRead(owner,b){
- const siteKey=typeof b.token==='string'&&b.token.length>=48&&await digest(b.token)===CFO_READ_KEY_HASH;
- if(siteKey){if(!['read','lark'].includes(b.op))throw Error('สิทธิ์ Dashboard ใช้อ่านข้อมูลเท่านั้น');}
+ const keyHash=typeof b.token==='string'&&b.token.length>=48?await digest(b.token):'';
+ const siteKey=!!keyHash&&(keyHash===CFO_READ_KEY_HASH||keyHash===owner.env.CFO_DASHBOARD_READ_KEY_HASH);
+ if(siteKey){if(!['read','lark','config'].includes(b.op))throw Error('สิทธิ์ Dashboard ใช้อ่านข้อมูลเท่านั้น');}
  else {const saved=await unifiedPortalAuth(owner,b.token);if(saved.stage!=='transfer')throw Error('ไม่มีสิทธิ์ดูข้อมูล CFO');}
- if(!['probe','inspect','read','lark'].includes(b.op))throw Error('คำสั่ง CFO ไม่ถูกต้อง');
+ if(!['probe','inspect','read','lark','config'].includes(b.op))throw Error('คำสั่ง CFO ไม่ถูกต้อง');
  const token=owner.env.PEAK_USER_TOKEN;
+ if(b.op==='config')return {ok:true,companies:[{id:'PWA',name:'พรอสเพอร์ เวลธี่ เอสเซท',connected:!!token},{id:'PSH',name:'โปรเซอร์วิส โฮม โซลูชั่น',connected:!!owner.env.PEAK_USER_TOKEN_PSH},{id:'ODP',name:'ออมนิ แดช เพย์ วอลเล็ต',connected:!!owner.env.PEAK_USER_TOKEN_ODP}]};
  if(b.op==='read'){
   const company=b.company||'PWA',emis={PWA:'MjUxNTQ2',PSH:'NTQzNjI3',ODP:'NDk1MTUw'};
   if(!emis[company])throw Error('บริษัทไม่ถูกต้อง');
   if(company!=='PWA'&&!siteKey)throw Error('ต้องใช้สิทธิ์ Dashboard สำหรับบริษัทนี้');
-  const companyToken=company==='PWA'?token:b.peakToken;
+  const companyToken=company==='PWA'?token:(owner.env['PEAK_USER_TOKEN_'+company]||b.peakToken);
   if(!companyToken)throw Error('ยังไม่เชื่อม PEAK ของ '+company);
   if(!/^20\d{2}-(0[1-9]|1[0-2])$/.test(b.month||''))throw Error('ระบุเดือน YYYY-MM');
   const start=b.fromMonth||b.month;

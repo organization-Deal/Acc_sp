@@ -39,6 +39,11 @@ export async function cfoRead(owner,b){
  if(!['probe','inspect','read','lark'].includes(b.op))throw Error('คำสั่ง CFO ไม่ถูกต้อง');
  const token=owner.env.PEAK_USER_TOKEN;
  if(b.op==='read'){
+  const company=b.company||'PWA',emis={PWA:'MjUxNTQ2',PSH:'NTQzNjI3',ODP:'NDk1MTUw'};
+  if(!emis[company])throw Error('บริษัทไม่ถูกต้อง');
+  if(company!=='PWA'&&!siteKey)throw Error('ต้องใช้สิทธิ์ Dashboard สำหรับบริษัทนี้');
+  const companyToken=company==='PWA'?token:b.peakToken;
+  if(!companyToken)throw Error('ยังไม่เชื่อม PEAK ของ '+company);
   if(!/^20\d{2}-(0[1-9]|1[0-2])$/.test(b.month||''))throw Error('ระบุเดือน YYYY-MM');
   const [year,month]=b.month.split('-').map(Number),from=b.month.replace('-','')+'01',to=b.month.replace('-','')+new Date(Date.UTC(year,month,0)).getUTCDate();
   const page=Number(b.page||1);if(!Number.isInteger(page)||page<1||page>1000)throw Error('หน้าไม่ถูกต้อง');
@@ -55,7 +60,11 @@ export async function cfoRead(owner,b){
    if(!/^\d{3,12}$/.test(b.account||''))throw Error('รหัสบัญชีไม่ถูกต้อง');
    path='FinancialReports/generalledger?fromDate='+from+'&toDate='+to+'&accountCode='+b.account+'&isShowSubAccount=true';
   }else throw Error('แหล่งข้อมูลไม่รองรับ');
-  return {ok:true,at:new Date().toISOString(),data:await get(owner,path,token)};
+  const data=await get(owner,path,companyToken);
+  for(const [key,field] of [['PeakExpenses','expenses'],['PeakReceipts','receipts']])for(const row of data[key]?.[field]||[]){
+   if(row.documentLink&&new URL(row.documentLink).searchParams.get('emi')!==emis[company])throw Error('ข้อมูล PEAK ไม่ตรงบริษัท '+company);
+  }
+  return {ok:true,company,at:new Date().toISOString(),data};
  }
  if(b.op==='lark'){
   const rows=[];let next='';

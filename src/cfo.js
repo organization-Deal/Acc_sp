@@ -1,9 +1,11 @@
 // Read-only CFO bridge. PEAK credentials stay in the existing Worker environment.
 import {unifiedPortalAuth} from './external-finance.js';
-import {api,recordsPath,textOf} from './finance.js';
+import {api,recordsPath,textOf,digest} from './finance.js';
 import {CFG} from './config.js';
 
 const BASE='https://api.peakaccount.com/api/v1/';
+// SHA-256 of the dedicated backend-only read key. Revocation removes this hash.
+const CFO_READ_KEY_HASH='c1f34aeacf4b9134a00d8ad9abfc28212c53c5ff55a8f47bf539fb5b974e3a28';
 export async function peakSignature(connectId,stamp){
  const key=await crypto.subtle.importKey('raw',new TextEncoder().encode(connectId),{name:'HMAC',hash:'SHA-1'},false,['sign']);
  return Array.from(new Uint8Array(await crypto.subtle.sign('HMAC',key,new TextEncoder().encode(stamp))),x=>x.toString(16).padStart(2,'0')).join('');
@@ -31,8 +33,9 @@ async function get(owner,path,userToken){
  return r.json();
 }
 export async function cfoRead(owner,b){
- const saved=await unifiedPortalAuth(owner,b.token);
- if(saved.stage!=='transfer')throw Error('ไม่มีสิทธิ์ดูข้อมูล CFO');
+ const siteKey=typeof b.token==='string'&&b.token.length>=48&&await digest(b.token)===CFO_READ_KEY_HASH;
+ if(siteKey){if(!['read','lark'].includes(b.op))throw Error('สิทธิ์ Dashboard ใช้อ่านข้อมูลเท่านั้น');}
+ else {const saved=await unifiedPortalAuth(owner,b.token);if(saved.stage!=='transfer')throw Error('ไม่มีสิทธิ์ดูข้อมูล CFO');}
  if(!['probe','inspect','read','lark'].includes(b.op))throw Error('คำสั่ง CFO ไม่ถูกต้อง');
  const token=owner.env.PEAK_USER_TOKEN;
  if(b.op==='read'){

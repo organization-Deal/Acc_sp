@@ -1,6 +1,6 @@
 // Read-only CFO bridge. PEAK credentials stay in the existing Worker environment.
 import {unifiedPortalAuth} from './external-finance.js';
-import {api,recordsPath} from './finance.js';
+import {api,recordsPath,textOf} from './finance.js';
 import {CFG} from './config.js';
 
 const BASE='https://api.peakaccount.com/api/v1/';
@@ -33,9 +33,31 @@ async function get(owner,path,userToken){
 export async function cfoRead(owner,b){
  const saved=await unifiedPortalAuth(owner,b.token);
  if(saved.stage!=='transfer')throw Error('ไม่มีสิทธิ์ดูข้อมูล CFO');
- if(b.op!=='probe')throw Error('คำสั่ง CFO ไม่ถูกต้อง');
+ if(!['probe','inspect','read','lark'].includes(b.op))throw Error('คำสั่ง CFO ไม่ถูกต้อง');
  const token=owner.env.PEAK_USER_TOKEN;
+ if(b.op==='read'){
+  if(!/^20\d{2}-(0[1-9]|1[0-2])$/.test(b.month||''))throw Error('ระบุเดือน YYYY-MM');
+  const [year,month]=b.month.split('-').map(Number),from=b.month.replace('-','')+'01',to=b.month.replace('-','')+new Date(Date.UTC(year,month,0)).getUTCDate();
+  const page=Number(b.page||1);if(!Number.isInteger(page)||page<1||page>1000)throw Error('หน้าไม่ถูกต้อง');
+  let path;
+  if(['expenses','receipts'].includes(b.resource)){
+   const resource=b.resource==='expenses'?'Expenses':'Receipts';
+   if(b.code){if(!/^[A-Za-z0-9_-]{1,80}$/.test(b.code))throw Error('เลขเอกสารไม่ถูกต้อง');path=resource+'?code='+encodeURIComponent(b.code)+'&getResult=1';}
+   else path=resource+'/list?dateStart='+from+'&dateEnd='+to+'&limit=100&page='+page+'&status=0'+(resource==='Expenses'?'&includeRemainAmount=1':'');
+  }else if(b.resource==='accounts')path='PaymentMethods?limit=100&page='+page+'&getResult=1';
+  else if(b.resource==='ledger'){
+   if(!/^\d{3,12}$/.test(b.account||''))throw Error('รหัสบัญชีไม่ถูกต้อง');
+   path='FinancialReports/generalledger?fromDate='+from+'&toDate='+to+'&accountCode='+b.account+'&isShowSubAccount=true';
+  }else throw Error('แหล่งข้อมูลไม่รองรับ');
+  return {ok:true,at:new Date().toISOString(),data:await get(owner,path,token)};
+ }
+ if(b.op==='lark'){
+  const rows=[];let next='';
+  do{const d=await api(owner.env,recordsPath(CFG.T_EXPENSE)+'?page_size=500'+(next?'&page_token='+encodeURIComponent(next):''));rows.push(...(d.items||[]));next=d.has_more?d.page_token:'';}while(next);
+  return {ok:true,at:new Date().toISOString(),rows:rows.map(r=>{const f=r.fields;return {id:r.record_id,company:textOf(f['บริษัทที่เบิก']),date:f['วันที่ใช้จ่าย']||null,submittedAt:f['วันที่ส่งคำขอ']||null,amount:Number(f['จำนวนเงิน']),person:textOf(f['ผู้เบิก']),personIds:(f['ผู้เบิก']||[]).flatMap(p=>p.record_ids||[]),category:textOf(f['ประเภทค่าใช้จ่ายที่เบิก'])||textOf(f['หมวดค่าใช้จ่าย']),description:textOf(f['รายละเอียดค่าใช้จ่าย'])||textOf(f['AI Gen ค่าใช้จ่าย']),status:textOf(f['สถานะเบิก']),docNo:textOf(f['เลขคำขอ']),group:textOf(f['เลขรอบเบิก']),proof:['แนบ Pay Slip','แนบใบเสร็จ','แนบใบกำกับภาษี'].some(k=>f[k]?.length),url:'https://ljpth1hipfdu.jp.larksuite.com/base/'+CFG.BASE_TOKEN+'?table='+CFG.T_EXPENSE+'&record='+r.record_id};})};
+ }
  const jobs=[['expenses','Expenses/list?limit=1&page=1&status=0&includeRemainAmount=1'],['receipts','Receipts/list?limit=1&page=1&status=0'],['accounts','PaymentMethods?limit=10&page=1&getResult=1']];
+ if(b.op==='inspect'){jobs.splice(0,jobs.length,['expenseDetail','Expenses?code=EXP-202601073&getResult=1'],['receiptDetail','Receipts?code=RT-20260101002&getResult=1'],['monthExpenses','Expenses/list?dateStart=20261101&dateEnd=20261121&limit=100&page=1&status=0&includeRemainAmount=1'],['monthReceipts','Receipts/list?dateStart=20261101&dateEnd=20261121&limit=100&page=1&status=0'],['accounts','PaymentMethods?limit=100&page=1&getResult=1'],['ledger','FinancialReports/generalledger?fromDate=20261101&toDate=20261121&accountCode=111201&isShowSubAccount=true']);}
  const output={ok:true,source:'PEAK',at:new Date().toISOString(),results:{}};
  for(const [name,path] of jobs){try{output.results[name]=await get(owner,path,token);}catch(e){output.results[name]={error:e.message};}}
  try{output.results.larkExpense=(await api(owner.env,recordsPath(CFG.T_EXPENSE)+'?page_size=1'));}catch(e){output.results.larkExpense={error:e.message};}

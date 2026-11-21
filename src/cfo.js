@@ -67,10 +67,10 @@ export async function cfoRead(owner,b){
   if(!/^20\d{6}$/.test(to)||to<from||to>monthEnd||new Date(to.slice(0,4)+'-'+to.slice(4,6)+'-'+to.slice(6,8)+'T00:00:00Z').toISOString().slice(0,10).replaceAll('-','')!==to)throw Error('วันสิ้นสุดไม่ถูกต้อง');
   const page=Number(b.page||1);if(!Number.isInteger(page)||page<1||page>1000)throw Error('หน้าไม่ถูกต้อง');
   let path;
-  if(['expenses','receipts'].includes(b.resource)){
-   const resource=b.resource==='expenses'?'Expenses':'Receipts';
+  if(['expenses','receipts','invoices'].includes(b.resource)){
+   const resource=b.resource==='expenses'?'Expenses':b.resource==='invoices'?'Invoices':'Receipts';
    if(b.code){if(!/^[A-Za-z0-9_-]{1,80}$/.test(b.code))throw Error('เลขเอกสารไม่ถูกต้อง');path=resource+'?code='+encodeURIComponent(b.code)+'&getResult=1';}
-   else path=resource+'/list?dateStart='+from+'&dateEnd='+to+'&limit=100&page='+page+'&status=0'+(resource==='Expenses'?'&includeRemainAmount=1':'');
+   else path=resource+'/list?dateStart='+from+'&dateEnd='+to+'&limit=100&page='+page+'&status=0'+(resource!=='Receipts'?'&includeRemainAmount=1':'');
   }else if(b.resource==='accounts')path='PaymentMethods?limit=100&page='+page+'&getResult=1';
   else if(b.resource==='trial')path='FinancialReports/trialbalance?fromMonth='+start.replace('-','')+'&toMonth='+b.month.replace('-','')+'&isShowSubAccount=false';
   else if(b.resource==='chart')path='DailyJournals/accountcode';
@@ -80,7 +80,7 @@ export async function cfoRead(owner,b){
    path='FinancialReports/generalledger?fromDate='+from+'&toDate='+to+'&accountCode='+b.account+'&isShowSubAccount=true';
   }else throw Error('แหล่งข้อมูลไม่รองรับ');
   const result=await get(owner,path,companyToken,b.fresh==='1'),data=result.data;
-  for(const [key,field] of [['PeakExpenses','expenses'],['PeakReceipts','receipts']])for(const row of data[key]?.[field]||[]){
+  for(const [key,field] of [['PeakExpenses','expenses'],['PeakReceipts','receipts'],['PeakInvoices','invoices']])for(const row of data[key]?.[field]||[]){
    if(row.documentLink&&new URL(row.documentLink).searchParams.get('emi')!==emis[company])throw Error('ข้อมูล PEAK ไม่ตรงบริษัท '+company);
   }
   return {ok:true,company,at:result.at,cached:result.cached,data};
@@ -88,7 +88,8 @@ export async function cfoRead(owner,b){
  if(b.op==='lark'){
   const rows=[];let next='';
   do{const d=await api(owner.env,recordsPath(CFG.T_EXPENSE)+'?page_size=500'+(next?'&page_token='+encodeURIComponent(next):''));rows.push(...(d.items||[]));next=d.has_more?d.page_token:'';}while(next);
-  return {ok:true,at:new Date().toISOString(),rows:rows.map(r=>{const f=r.fields;return {id:r.record_id,company:textOf(f['บริษัทที่เบิก']),date:f['วันที่ใช้จ่าย']||null,submittedAt:f['วันที่ส่งคำขอ']||null,amount:Number(f['จำนวนเงิน']),person:textOf(f['ผู้เบิก']),personIds:(f['ผู้เบิก']||[]).flatMap(p=>p.record_ids||[]),category:textOf(f['ประเภทค่าใช้จ่ายที่เบิก'])||textOf(f['หมวดค่าใช้จ่าย']),description:textOf(f['รายละเอียดค่าใช้จ่าย'])||textOf(f['AI Gen ค่าใช้จ่าย']),status:textOf(f['สถานะเบิก']),docNo:textOf(f['เลขคำขอ']),group:textOf(f['เลขรอบเบิก']),proof:['แนบ Pay Slip','แนบใบเสร็จ','แนบใบกำกับภาษี'].some(k=>f[k]?.length),url:'https://ljpth1hipfdu.jp.larksuite.com/base/'+CFG.BASE_TOKEN+'?table='+CFG.T_EXPENSE+'&record='+r.record_id};})};
+  const employees=new Map();let employeeWarning='';try{let page='';do{const d=await api(owner.env,recordsPath(CFG.T_EMPLOYEE)+'?page_size=500'+(page?'&page_token='+encodeURIComponent(page):''));for(const e of d.items||[])employees.set(e.record_id,{department:textOf(e.fields['แผนก'])||textOf(e.fields['ฝ่าย'])||textOf(e.fields['Department'])});page=d.has_more?d.page_token:'';}while(page);}catch{employeeWarning='อ่านทะเบียนแผนกไม่สำเร็จ แสดงเฉพาะแผนกที่ระบุในคำขอ';}
+  return {ok:true,at:new Date().toISOString(),employeeWarning,rows:rows.map(r=>{const f=r.fields,personIds=(Array.isArray(f['ผู้เบิก'])?f['ผู้เบิก']:[]).flatMap(p=>p.record_ids||[]),department=textOf(f['แผนก'])||textOf(f['ฝ่าย'])||(personIds.length===1?employees.get(personIds[0])?.department:'')||'';return {id:r.record_id,company:textOf(f['บริษัทที่เบิก']),date:f['วันที่ใช้จ่าย']||null,submittedAt:f['วันที่ส่งคำขอ']||null,amount:f['จำนวนเงิน']==null||f['จำนวนเงิน']===''?null:Number(f['จำนวนเงิน']),person:textOf(f['ผู้เบิก']),personIds,department,peakCode:textOf(f['เลขเอกสาร PEAK'])||textOf(f['เลขที่เอกสาร PEAK']),category:textOf(f['ประเภทค่าใช้จ่ายที่เบิก'])||textOf(f['หมวดค่าใช้จ่าย']),description:textOf(f['รายละเอียดค่าใช้จ่าย'])||textOf(f['AI Gen ค่าใช้จ่าย']),status:textOf(f['สถานะเบิก']),docNo:textOf(f['เลขคำขอ']),group:textOf(f['เลขรอบเบิก']),proof:['แนบ Pay Slip','แนบใบเสร็จ','แนบใบกำกับภาษี',CFG.F.ATT_EVIDENCE].some(k=>f[k]?.length),url:'https://ljpth1hipfdu.jp.larksuite.com/base/'+CFG.BASE_TOKEN+'?table='+CFG.T_EXPENSE+'&record='+r.record_id};})};
  }
  const jobs=[['expenses','Expenses/list?limit=1&page=1&status=0&includeRemainAmount=1'],['receipts','Receipts/list?limit=1&page=1&status=0'],['accounts','PaymentMethods?limit=10&page=1&getResult=1']];
  if(b.op==='inspect'){jobs.splice(0,jobs.length,['expenseDetail','Expenses?code=EXP-202601073&getResult=1'],['receiptDetail','Receipts?code=RT-20260101002&getResult=1'],['monthExpenses','Expenses/list?dateStart=20261101&dateEnd=20261121&limit=100&page=1&status=0&includeRemainAmount=1'],['monthReceipts','Receipts/list?dateStart=20261101&dateEnd=20261121&limit=100&page=1&status=0'],['accounts','PaymentMethods?limit=100&page=1&getResult=1'],['ledger','FinancialReports/generalledger?fromDate=20261101&toDate=20261121&accountCode=111201&isShowSubAccount=true']);}

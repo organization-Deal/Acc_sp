@@ -59,7 +59,10 @@ export async function cfoRead(owner,b){
   const companyToken=company==='PWA'?token:b.peakToken;
   if(!companyToken)throw Error('ยังไม่เชื่อม PEAK ของ '+company);
   if(!/^20\d{2}-(0[1-9]|1[0-2])$/.test(b.month||''))throw Error('ระบุเดือน YYYY-MM');
-  const [year,month]=b.month.split('-').map(Number),from=b.month.replace('-','')+'01',to=b.month.replace('-','')+new Date(Date.UTC(year,month,0)).getUTCDate();
+  const start=b.fromMonth||b.month;
+  if(!/^20\d{2}-(0[1-9]|1[0-2])$/.test(start)||start>b.month||start.slice(0,4)!==b.month.slice(0,4))throw Error('ช่วงเวลาไม่ถูกต้อง ต้องอยู่ในปีเดียวกัน');
+  const [year,month]=b.month.split('-').map(Number),from=start.replace('-','')+'01',monthEnd=b.month.replace('-','')+new Date(Date.UTC(year,month,0)).getUTCDate(),to=b.toDate||monthEnd;
+  if(!/^20\d{6}$/.test(to)||to<from||to>monthEnd||new Date(to.slice(0,4)+'-'+to.slice(4,6)+'-'+to.slice(6,8)+'T00:00:00Z').toISOString().slice(0,10).replaceAll('-','')!==to)throw Error('วันสิ้นสุดไม่ถูกต้อง');
   const page=Number(b.page||1);if(!Number.isInteger(page)||page<1||page>1000)throw Error('หน้าไม่ถูกต้อง');
   let path;
   if(['expenses','receipts'].includes(b.resource)){
@@ -67,7 +70,7 @@ export async function cfoRead(owner,b){
    if(b.code){if(!/^[A-Za-z0-9_-]{1,80}$/.test(b.code))throw Error('เลขเอกสารไม่ถูกต้อง');path=resource+'?code='+encodeURIComponent(b.code)+'&getResult=1';}
    else path=resource+'/list?dateStart='+from+'&dateEnd='+to+'&limit=100&page='+page+'&status=0'+(resource==='Expenses'?'&includeRemainAmount=1':'');
   }else if(b.resource==='accounts')path='PaymentMethods?limit=100&page='+page+'&getResult=1';
-  else if(b.resource==='trial')path='FinancialReports/trialbalance?fromMonth='+b.month.replace('-','')+'&toMonth='+b.month.replace('-','')+'&isShowSubAccount=false';
+  else if(b.resource==='trial')path='FinancialReports/trialbalance?fromMonth='+start.replace('-','')+'&toMonth='+b.month.replace('-','')+'&isShowSubAccount=false';
   else if(b.resource==='chart')path='DailyJournals/accountcode';
   else if(b.resource==='contacts')path='Contacts/list?limit=100&page='+page;
   else if(b.resource==='ledger'){

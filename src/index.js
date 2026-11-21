@@ -3,6 +3,7 @@ import {transferPage} from './transfer.js';
 import {financeTick,financeCallback,verifiedCallback} from './finance.js';
 import {validateBills} from './validation.js';
 import { companyOf, companyError } from './companies.js';
+import {cfoRead} from './cfo.js';
 // ════════════════════════════════════════════════════════════════
 // index.js — Worker entry + SessionDO
 //
@@ -62,6 +63,7 @@ async function handleGet(request, env, ctx) {
   const url = new URL(request.url);
   const p = Object.fromEntries(url.searchParams);
   const act = p.act || '';
+  if(act==='cfo-data'){try{const data=await doStub(env,'finance-coordinator-v1').cfoRead({token:request.headers.get('Authorization')?.replace(/^Bearer /,'')||p.k,op:p.op});return new Response(JSON.stringify(data),{headers:{'Content-Type':'application/json','Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'}});}catch(e){return new Response(JSON.stringify({ok:false,error:e.message}),{status:403,headers:{'Content-Type':'application/json','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}}
   if(act==='external-document'){try{const d=await doStub(env,'finance-coordinator-v1').externalDocumentAccess(p);return new Response(d.bytes,{headers:{'Content-Type':'application/pdf','Content-Disposition':'inline; filename="'+d.filename+'"','Cache-Control':'private, no-store','Referrer-Policy':'no-referrer','X-Content-Type-Options':'nosniff'}});}catch{return new Response('ไม่มีสิทธิ์ เอกสารเปลี่ยน หรือลิงก์หมดอายุ ให้เปิดการ์ดล่าสุด',{status:403});}}
   if(act==='external-transfers'){try{await doStub(env,'finance-coordinator-v1').externalTransferAccess(p.k);return new Response(externalTransferPage(p.k),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}catch{return new Response('ลิงก์หมดอายุ เปิดการ์ดรอโอนล่าสุด',{status:403});}}
   if(act==='transfers'){try{await doStub(env,'finance-coordinator-v1').transferAccess(p.k);return new Response(transferPage(p.k),{headers:{'Content-Type':'text/html; charset=utf-8','Cache-Control':'no-store','Referrer-Policy':'no-referrer'}});}catch{return new Response('ลิงก์หมดอายุ เปิดการ์ดล่าสุดในผู้ช่วยบัญชี',{status:403});}}
@@ -225,6 +227,7 @@ async function handleMessage(event, env) {
 // storage 'session' = { openId, state:{itemsById,bills,pool}, cardmsg, tok, tosave }
 // ════════════════════════════════════════════════════════════════
 export class SessionDO extends DurableObject {
+  async cfoRead(b){return cfoRead(this,b);}
   async transferAccess(k){await unifiedPortalAuth(this,k);return true;}
   async transferAction(b){if(['rows','resume'].includes(b.op))return unifiedPortalAction(this,b);const run=(this.financeSerial||Promise.resolve()).then(()=>unifiedPortalAction(this,b));this.financeSerial=run.catch(()=>{});this.ctx.waitUntil(this.financeSerial);return run;}
 

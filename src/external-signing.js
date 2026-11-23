@@ -19,6 +19,12 @@ async function imageAsset(bundle,id,expected){
 export async function prepareSigningProfile(owner,x,context){
  const a=x.audit,p=context.signing?.get(x.company.id),name=context.names.get(a?.may?.actor);
  if(a?.stage!=='transfer'||!a.not?.actor||!a.not?.at||!a.may?.actor||!a.may?.at)throw Error('ยังไม่มีการอนุมัติจริงสำหรับลงนาม');
+ if(a.may.delegated){
+  const decision=await owner.ctx.storage.get('external:delegate-decision:'+a.epoch);
+  if(!decision||decision.actor!==a.may.actor||decision.at!==a.may.at||decision.id!==x.id||decision.fingerprint!==a.fingerprint||!name||!p?.stampId)throw Error('ไม่พบการยืนยันตัวผู้อนุมัติแทนสำหรับเอกสารนี้');
+  const stamp=await imageAsset(await assetBundle(owner),p.stampId);
+  return {version:SIGNING_VERSION,mode:'lark-delegate',name,actor:decision.actor,at:decision.at,company:x.company.id,stampId:p.stampId,stampHash:stamp.hash};
+ }
  if(!p?.approver||!name||!sameName(p.approver,name)||!p.signatureId||!p.stampId)throw Error('ผู้อนุมัติหรือลายเซ็นไม่ตรงทะเบียนบริษัท');
  const bundle=await assetBundle(owner),signature=await imageAsset(bundle,p.signatureId),stamp=await imageAsset(bundle,p.stampId);
  return {version:SIGNING_VERSION,name,actor:a.may.actor,at:a.may.at,company:x.company.id,signatureId:p.signatureId,stampId:p.stampId,signatureHash:signature.hash,stampHash:stamp.hash};
@@ -26,5 +32,6 @@ export async function prepareSigningProfile(owner,x,context){
 export async function signingImages(owner,profile){
  if(profile?.version!==SIGNING_VERSION)throw Error('ข้อมูลลงนามไม่ครบ');
  const bundle=await assetBundle(owner);
+ if(profile.mode==='lark-delegate')return {stamp:(await imageAsset(bundle,profile.stampId,profile.stampHash)).bytes};
  return {signature:(await imageAsset(bundle,profile.signatureId,profile.signatureHash)).bytes,stamp:(await imageAsset(bundle,profile.stampId,profile.stampHash)).bytes};
 }

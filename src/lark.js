@@ -184,7 +184,8 @@ export async function saveBills(env, emp, bills, onSaved = async () => {}) {
     f['สกุลเงิน'] = 'Thai Baht (THB) '; 
     f[CFG.F.REQUESTER] = [emp.record_id];
     f[CFG.F.DETAIL]    = b.ai_detail || b.anchor.vendor || b.category || 'ค่าใช้จ่าย';
-    if (b.ai_detail) f[CFG.F.AI_DETAIL] = b.ai_detail;
+    // The live expense table stores the confirmed purpose in DETAIL only.
+    // Do not also write the removed "AI Gen ค่าใช้จ่าย" field.
     f[CFG.F.AMOUNT]    = b.amount || 0;
     f[CFG.F.STATUS]    = CFG.STATUS_PENDING;
     f[CFG.F.DATE] = new Date(b.expense_date+'T00:00:00+07:00').getTime();

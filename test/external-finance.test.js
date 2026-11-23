@@ -262,3 +262,12 @@ test('portal and transfer card expose actual submitted purposes, bounded to 100 
   assert.ok(result.rows.every(x=>x.summary.length<=100));assert.match(JSON.stringify(h.cards.get(saved.message).card),/ค่าน้ำมัน ไปดูตู้ชกมวย/);
  }finally{h.restore();}
 });
+test('partner Pay-In PDF supports QR text or an empty account without inventing bank digits',async()=>{
+ const r=record('partner');r.fields['เอกสารแนบ']=[{file_token:'payin',name:'pay-in.pdf'}];
+ for(const instructions of ['สแกนคิวอาร์โค้ด','สแกน QR 123456','']){
+  r.fields['เลขบัญชีผู้รับเงิน']=instructions;const x=externalRow('partner',r);
+  assert.equal(externalProblem(x),'');assert.equal(x.account,'');assert.ok(x.paymentInstructions);
+  assert.equal(externalSlipFits({amount:x.amount,currency:'THB',recipient_acct:'123456'},x),false);
+ }
+ r.fields['เอกสารแนบ']=[];assert.match(externalProblem(externalRow('partner',r)),/เลขบัญชี/);
+});

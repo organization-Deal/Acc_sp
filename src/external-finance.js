@@ -9,7 +9,7 @@ import {transferPage,portalAuth,portalAction,internalTransferRows,slipFits} from
 import {expenseSummary} from './expense-summary.js';
 import {internalTransferDocument} from './internal-transfer-document.js';
 
-export const EXTERNAL_FLOW_VERSION='external-flow-v3-transfer-evidence';
+export const EXTERNAL_FLOW_VERSION='external-flow-v4-document-payment';
 export const EF={request:'บัญชีเช็กแล้ว → ส่งให้นอต',status:'สถานะงาน',not:'นอตตรวจผ่าน',may:'เมย์อนุมัติ',delivery:'หลักฐานส่งให้นอต',audit:'ข้อมูล Flow (ระบบ)'};
 export const EXTERNAL_TABLES={
  partner:{table:'tbldczVhrFWfJ5ze',label:'คู่ค้า',doc:'รายการเบิก',company:'ชื่อบริษัท',name:'ชื่อบริษัทคู่ค้าผู้รับเงิน',amount:'ยอดโอนเงิน',account:'เลขบัญชีผู้รับเงิน',detail:'ชื่อรายการ',attachments:['เอกสารแนบ']},
@@ -31,11 +31,19 @@ export function externalRow(kind,r){
  const t=EXTERNAL_TABLES[kind];if(!t)throw Error('Unknown external table');const f=r.fields||{},company=companyFromName(textOf(f[t.company]));
  const evidence=t.attachments.map(k=>[k,(f[k]||[]).map(a=>String(a.file_token||'')).filter(Boolean).sort()]);
  const requesters=(Array.isArray(f['การเงินที่ทำเรื่องเบิก'])?f['การเงินที่ทำเรื่องเบิก']:[]).map(p=>({id:String(p.id||''),name:String(p.name||'')}));
- return {requesters,createdAt:Number(f[kind==='partner'?'วันที่ทำรายการ':'Date Created']||r.created_time||0),kind,table:t.table,r,id:kind+':'+r.record_id,doc:textOf(f[t.doc]),company,name:textOf(f[t.name]),amount:Number(f[t.amount]),account:eDigits(f[t.account]),bank:textOf(f['ธนาคาร']),currency:kind==='dealpay'?'THB':/THB|BAHT/i.test(textOf(f['สกุลเงิน']))?'THB':'',detail:textOf(f[t.detail]),note:textOf(f[kind==='dealpay'?'เหตุผลขอคืนเงิน':'เหตุผลในการเบิกเงิน'])||(kind==='dealpay'?'ลูกค้าชำระเงินแล้วไม่สามารถใช้บริการตู้ได้':''),machine:textOf(f['ประเภทตู้']),peak:eLink(f['ลงบันทึกค่าใช้จ่ายใน PEAK']),evidence,audit:eAudit(r)};
+ const rawAccount=textOf(f[t.account]).trim();
+ const account=eDigits(rawAccount);
+ const hasPaymentPdf=kind==='partner'&&(f['เอกสารแนบ']||[]).some(a=>a.file_token&&(/\.pdf$/i.test(a.name||'')||a.type==='application/pdf'));
+ const hasBankNumber=/^[0-9\s-]+$/.test(rawAccount)&&/^\d{6,20}$/.test(account);
+ const usesDocument=!rawAccount||/สแกน|คิวอาร์|คิวอา|\bQR\b|pay[- ]?in|ดู.*(?:เอกสาร|ไฟล์|แนบ|pdf)/i.test(rawAccount);
+ const documentPayment=hasPaymentPdf&&!hasBankNumber&&(usesDocument||!/^\d{6,20}$/.test(account));
+ return {documentPayment,paymentInstructions:documentPayment?(rawAccount||'ดูวิธีชำระใน PDF แนบ'):'',requesters,createdAt:Number(f[kind==='partner'?'วันที่ทำรายการ':'Date Created']||r.created_time||0),kind,table:t.table,r,id:kind+':'+r.record_id,doc:textOf(f[t.doc]),company,name:textOf(f[t.name]),amount:Number(f[t.amount]),account:documentPayment?'':account,bank:textOf(f['ธนาคาร']),currency:kind==='dealpay'?'THB':/THB|BAHT/i.test(textOf(f['สกุลเงิน']))?'THB':'',detail:textOf(f[t.detail]),note:textOf(f[kind==='dealpay'?'เหตุผลขอคืนเงิน':'เหตุผลในการเบิกเงิน'])||(kind==='dealpay'?'ลูกค้าชำระเงินแล้วไม่สามารถใช้บริการตู้ได้':''),machine:textOf(f['ประเภทตู้']),peak:eLink(f['ลงบันทึกค่าใช้จ่ายใน PEAK']),evidence,audit:eAudit(r)};
 }
 export async function externalFingerprint(x){
  // file_token is stable; signed download URLs and the random display case number are not financial identity.
- return digest([x.kind,x.table,x.r.record_id,x.company?.id||'',x.name,x.account,x.bank,x.amount,x.currency,x.detail,x.note,x.machine,x.peak,x.evidence,x.requesters]);
+ const fields=[x.kind,x.table,x.r.record_id,x.company?.id||'',x.name,x.account,x.bank,x.amount,x.currency,x.detail,x.note,x.machine,x.peak,x.evidence,x.requesters];
+ if(x.documentPayment)fields.push(x.paymentInstructions);
+ return digest(fields);
 }
 // Preserve genuine pre-document decisions only when their original financial snapshot still matches.
 export async function externalUpgradeAudit(owner,x){
@@ -50,7 +58,7 @@ export function externalProblem(x){
  if(x.kind==='dealpay'&&!x.note)return 'ระบุเหตุผลขอคืนเงินก่อน';
  if(!x.company)return 'เลือกบริษัทผู้จ่ายก่อน';
  if(!Number.isFinite(x.amount)||x.amount<=0)return 'ยอดเงินไม่ถูกต้อง';
- if(!x.name||!x.bank||!/^\d{6,20}$/.test(x.account))return 'ชื่อผู้รับ ธนาคาร หรือเลขบัญชีไม่ครบ';
+ if(!x.name||!x.documentPayment&&(!x.bank||!/^\d{6,20}$/.test(x.account)))return 'ชื่อผู้รับ ธนาคาร หรือเลขบัญชีไม่ครบ';
  if(x.currency!=='THB')return 'รอบนี้รองรับเงินบาทเท่านั้น';
  if(!x.detail)return 'รายละเอียดรายการไม่ครบ';
  if(x.kind==='partner'&&!x.peak)return 'แนบลิงก์ PEAK เดิมก่อน';
@@ -92,7 +100,7 @@ export async function externalAccounting(owner,row){
 async function eSend(env,to,c,key){const d=await api(env,'im/v1/messages?receive_id_type=open_id','POST',{receive_id:to,msg_type:'interactive',content:JSON.stringify(c),uuid:(await digest(key)).slice(0,50)});if(!d.message_id)throw Error('ส่งไม่สำเร็จ: ไม่มีรหัสข้อความ');return d.message_id;}
 async function ePatch(owner,key,saved,c){const hash=await digest(c);if(saved.renderHash===hash)return;await api(owner.env,'im/v1/messages/'+encodeURIComponent(saved.message),'PATCH',{content:JSON.stringify(c)});saved.renderHash=hash;await owner.ctx.storage.put(key,saved);}
 const eDocumentUrl=(x,nonce,stage,env)=> (env?.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-document&k='+encodeURIComponent(nonce)+'&id='+encodeURIComponent(x.id)+'&stage='+stage;
-function eDescription(x){return '**'+eMd(EXTERNAL_TABLES[x.kind].label)+' • '+eMd(x.r.fields[ED.number]||x.doc)+'**\n'+eMd(x.company?.name||'ยังไม่ระบุบริษัท')+'\n'+eMd(x.detail)+(x.machine?' • '+eMd(x.machine):'')+'\nผู้รับ: '+eMd(x.name)+' • **'+eMoney(x.amount)+' '+x.currency+'**\n'+eMd(x.bank)+' • '+eMd(x.account)+'\n'+(x.peak?'[ดู PEAK เดิม]('+x.peak+') | ':'')+'[เปิดรายการและหลักฐาน]('+eUrl(x)+')';}
+function eDescription(x){return '**'+eMd(EXTERNAL_TABLES[x.kind].label)+' • '+eMd(x.r.fields[ED.number]||x.doc)+'**\n'+eMd(x.company?.name||'ยังไม่ระบุบริษัท')+'\n'+eMd(x.detail)+(x.machine?' • '+eMd(x.machine):'')+'\nผู้รับ: '+eMd(x.name)+' • **'+eMoney(x.amount)+' '+x.currency+'**\n'+eMd(x.bank)+' • '+eMd(x.paymentInstructions||x.account)+'\n'+(x.peak?'[ดู PEAK เดิม]('+x.peak+') | ':'')+'[เปิดรายการและหลักฐาน]('+eUrl(x)+')';}
 async function eRender(saved,all){
  const elements=[ePara('บัญชีเช็ก → นอตตรวจ → เมย์อนุมัติ → กลับนอตโอน\nปุ่มใช้ได้เฉพาะ'+(saved.stage==='not'?'นอต':'เมย์')+' • การอนุมัติยังไม่ใช่การโอนเงิน')];let pending=0;
  for(const sig of saved.signatures){const x=all.find(r=>r.id===sig.id);if(!x){elements.push(ePara('รายการต้นทางไม่พบ'));continue;}
@@ -116,7 +124,7 @@ export function externalTransferCard(saved,rows,env){
  for(const group of groups.values())elements.push(ePara('**'+eMd(group[0].company.name)+'**\n'+group.length+' รายการ • '+transferTotals(group)));
  let shown=0;
  for(const group of groups.values())for(const x of group){
-  const item=ePara('**'+(shown+1)+'. '+eMd(x.name)+' • '+eMoney(x.amount)+' '+x.currency+'**\n'+x.company.id+' • '+eMd(transferLabel(x.kind))+' • '+eMd(textOf(x.r.fields[ED.number])||x.doc)+'\n'+eMd(x.bank)+' • '+eMd(x.account)+'\nรายการ: '+eMd(transferSummary(x))+'\n[PDF รวมไฟล์แนบ]('+(x.pdf||eDocumentUrl(x,saved.nonce,'approved',env))+') | [เปิดรายการ / หลักฐาน]('+eUrl(x)+')'+(x.r.fields['หลักฐานการโอน']?.length?'\n⚠️ มีหลักฐานโอนแล้ว ตรวจสอบก่อนโอนซ้ำ':''));
+  const item=ePara('**'+(shown+1)+'. '+eMd(x.name)+' • '+eMoney(x.amount)+' '+x.currency+'**\n'+x.company.id+' • '+eMd(transferLabel(x.kind))+' • '+eMd(textOf(x.r.fields[ED.number])||x.doc)+'\n'+eMd(x.bank)+' • '+eMd(x.paymentInstructions||x.account)+'\nรายการ: '+eMd(transferSummary(x))+'\n[PDF รวมไฟล์แนบ]('+(x.pdf||eDocumentUrl(x,saved.nonce,'approved',env))+') | [เปิดรายการ / หลักฐาน]('+eUrl(x)+')'+(x.r.fields['หลักฐานการโอน']?.length?'\n⚠️ มีหลักฐานโอนแล้ว ตรวจสอบก่อนโอนซ้ำ':''));
   // Keep one card even for a large queue; the portal always contains every current row.
   if(shown>=30||new TextEncoder().encode(JSON.stringify([...elements,item])).length>23000)continue;
   elements.push(item);shown++;
@@ -261,7 +269,7 @@ export async function externalPortalAuth(owner,token){
  const key=await owner.ctx.storage.get('external:nonce:'+token),saved=key&&await owner.ctx.storage.get(key);
  if(!saved||saved.retired||saved.stage!=='transfer'||Date.now()-saved.created>7*86400000||saved.recipient!==(await people(owner.env)).not)throw Error('ลิงก์หมดอายุ เปิดการ์ดรอโอนล่าสุด');return saved;
 }
-const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+(textOf(x.r.fields[ED.number])||x.doc),company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,amount:x.amount,currency:x.currency,bills:1,summary:expenseSummary([x.detail],x.note),pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
+const ePortalRow=(x,saved,env)=>({id:x.id,doc:EXTERNAL_TABLES[x.kind].label+' • '+(textOf(x.r.fields[ED.number])||x.doc),company:x.company.name,company_id:x.company.id,name:x.name,bank:x.bank,account:x.account,paymentInstructions:x.paymentInstructions,amount:x.amount,currency:x.currency,bills:1,summary:expenseSummary([x.detail],x.note),pdf:eDocumentUrl(x,saved.nonce,'approved',env),hasSlip:!!x.r.fields['หลักฐานการโอน']?.length});
 export function externalSlipFits(o,x){return slipFits(o,{...x,company_id:x.company.id});}
 export async function externalPortalAction(owner,b,session){
  const saved=session||await externalPortalAuth(owner,b.token),{ctx,env}=owner;
@@ -308,7 +316,7 @@ export async function unifiedPortalAuth(owner,token){
 export async function unifiedPortalAction(owner,b){
  const saved=await unifiedPortalAuth(owner,b.token);
  if(saved.stage==='test')return portalAction(owner,b,saved);
- if(['resume','reread','reference'].includes(b.op))return portalAction(owner,b,saved);
+ if(['resume','reread','reference','discard'].includes(b.op))return portalAction(owner,b,saved);
  if(b.op==='rows'){
   const [internal,external]=await Promise.all([internalTransferRows(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);
   const rows=[...internal.map(({source,...x})=>({...x,doc:'เบิกภายใน • '+x.doc,originalPdf:x.pdf,pdf:eDocumentUrl({id:'internal:'+x.id},saved.nonce,'approved',owner.env)})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];

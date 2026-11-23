@@ -11,7 +11,7 @@ const navy=[.10,.16,.25],teal=[.02,.40,.42],grey=[.36,.42,.48];
 const clean=v=>String(v??'').replace(/[\u0000-\u0008\u000B-\u001F]/g,'').normalize('NFC');
 const date=v=>v?new Date(v).toLocaleString('th-TH',{timeZone:'Asia/Bangkok',dateStyle:'medium',timeStyle:'short'}):'-';
 export async function renderExternalPdf(m){
- if(m.stage!=='request'&&(!m.signing?.name||!m.signing?.signature||!m.signing?.stamp||m.signing.at!==m.may?.at))throw Error('ไม่มีข้อมูลลงนามที่ตรงกับการอนุมัติ');
+ if(m.stage!=='request'&&(!m.signing?.name||(!m.signing?.signature&&m.signing?.mode!=='lark-delegate')||!m.signing?.stamp||m.signing.at!==m.may?.at))throw Error('ไม่มีข้อมูลลงนามที่ตรงกับการอนุมัติ');
  const doc=await PDFDocument.create();doc.registerFontkit(fontkit);
  const font=await doc.embedFont(bytes,{subset:false});doc.setTitle(m.title+' '+m.number);doc.setAuthor(m.company.name);doc.setCreationDate(new Date(m.generatedAt));doc.setModificationDate(new Date(m.generatedAt));
  let page,y,key;const pages=[];const left=42,width=511;
@@ -55,8 +55,9 @@ export async function renderExternalPdf(m){
  centre(m.stage==='request'?'(................................................)':m.signing.name,centres[1],top-54);
  centre('ผู้อนุมัติ',centres[1],top-69);centre(m.stage==='request'?'วันที่ ........................................':'วันที่ '+date(m.signing.at),centres[1],top-84,8,grey);
  if(m.stage!=='request'){
-  const sig=await doc.embedPng(m.signing.signature),seal=await doc.embedPng(m.signing.stamp),ss=sig.scaleToFit(116,42),zs=seal.scaleToFit(80,66);
-  page.drawImage(sig,{x:centres[1]-ss.width/2,y:top-36,width:ss.width,height:ss.height});
+  const seal=await doc.embedPng(m.signing.stamp),zs=seal.scaleToFit(80,66);
+  if(m.signing.mode==='lark-delegate')centre('อนุมัติแทนผ่าน Lark',centres[1],top-27);
+  else {const sig=await doc.embedPng(m.signing.signature),ss=sig.scaleToFit(116,42);page.drawImage(sig,{x:centres[1]-ss.width/2,y:top-36,width:ss.width,height:ss.height});}
   page.drawImage(seal,{x:centres[1]-zs.width/2,y:top-156,width:zs.width,height:zs.height});
  }else page.drawRectangle({x:centres[1]-42,y:top-156,width:84,height:62,borderWidth:.4,borderColor:rgb(.8,.83,.85)});
  centre('ตราประทับบริษัท',centres[1],top-169,8,grey);y=top-180;

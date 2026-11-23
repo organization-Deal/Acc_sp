@@ -33,10 +33,9 @@ export function payerCompany(o){
 }
 // A Pay-In slip identifies a biller instead of a destination account.
 export function sameBiller(left,right){
- const normalize=value=>String(value||'').normalize('NFC').toLowerCase().replace(/^\s*\d+\s+/,'').replace(/\s+/g,' ').trim();
- const revenue=value=>/^(?:กรมสรรพากร|ภาษีสรรพากร|revenue department)(?:\s*\([^()]+\))?$/.test(value);
- const a=normalize(left),b=normalize(right);
- return a.length>=4&&b.length>=4&&(a===b||revenue(a)&&revenue(b));
+ const [a,b]=[left,right].map(value=>String(value||'').normalize('NFC').toLowerCase().replace(/^\s*\d+\s+/,'').replace(/\s+/g,' ').trim());
+ const revenue=/^(?:กรมสรรพากร|ภาษีสรรพากร|revenue department)(?:\s*\([^()]+\))?$/;
+ return a.length>=4&&b.length>=4&&(a===b||revenue.test(a)&&revenue.test(b));
 }
 export function slipFits(o,r){
  const payer=payerCompany(o),cid=r.company_id||r.company?.id;

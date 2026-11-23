@@ -81,18 +81,23 @@ export async function externalStage(x){
  return 'blocked';
 }
 const eStatus={documents:'รอสร้างเอกสาร PDF',accounting:'รอบัญชีเช็ก',not:'บัญชีเช็กแล้ว • รอนอตตรวจ',may:'นอตตรวจผ่าน • รอเมย์อนุมัติ',transfer:'เมย์อนุมัติแล้ว • รอนอตโอน',returned:'ส่งกลับให้บัญชีตรวจใหม่',closed:'บันทึกโอนแล้ว'};
+// One reviewed snapshot only. A resubmission needs its own authorization.
+const delegatedSnapshot='f9bafaa2b570faeb137c462e012bd3db77ef4531d08f9351c206b57cd9d5bfa4';
+const delegatedEpoch='d76c44d0-66c9-4e21-a9b9-d7a076b37d4c';
+const permitsDelegate=x=>x.kind==='partner'&&x.audit?.fingerprint===delegatedSnapshot&&x.audit?.epoch===delegatedEpoch;
+const statusFor=(stage,a)=>stage==='transfer'&&a?.may?.delegated?'นอตอนุมัติแทนเมย์แล้ว • รอนอตโอน':eStatus[stage];
 async function eList(env,table){let out=[],page='';do{const d=await api(env,recordsPath(table)+'?page_size=500'+(page?'&page_token='+encodeURIComponent(page):''));out.push(...d.items||[]);page=d.has_more?d.page_token:'';}while(page);return out;}
 export async function externalSnapshot(env){return (await Promise.all(Object.entries(EXTERNAL_TABLES).map(async([kind,t])=>(await eList(env,t.table)).map(r=>externalRow(kind,r))))).flat();}
 async function eFresh(env,x){return externalRow(x.kind,(await api(env,recordsPath(x.table)+'/'+x.r.record_id)).record);}
 async function eWrite(env,x,fields){await api(env,recordsPath(x.table)+'/'+x.r.record_id,'PUT',{fields});Object.assign(x.r.fields,fields);x.audit=eAudit(x.r);}
-async function eStateWrite(env,x,a,extra={}){await eWrite(env,x,{[EF.audit]:JSON.stringify(a),[EF.status]:eStatus[a.stage]||'รอบัญชีเช็ก',[EF.not]:!!a.not,[EF.may]:!!a.may,...extra});}
+async function eStateWrite(env,x,a,extra={}){await eWrite(env,x,{[EF.audit]:JSON.stringify(a),[EF.status]:statusFor(a.stage,a)||'รอบัญชีเช็ก',[EF.not]:!!a.not,[EF.may]:!!a.may,...extra});}
 export async function externalAccounting(owner,row){
  const x=await eFresh(owner.env,row);if(x.r.fields[EF.request]!==true)return x;
  const problem=externalProblem(x);if(eClosed(x.r)||problem){await eWrite(owner.env,x,{[EF.request]:false,[EF.status]:eClosed(x.r)?eStatus.closed:'ยังไม่ส่ง • '+problem});return x;}
  const fingerprint=await externalFingerprint(x),old=x.audit;
  if(!await documentReady(x,'request',fingerprint))return x;
  if(old?.fingerprint===fingerprint&&['may','transfer'].includes(old.stage)){
-  await eWrite(owner.env,x,{[EF.request]:false,[EF.status]:eStatus[old.stage]});return x;
+  await eWrite(owner.env,x,{[EF.request]:false,[EF.status]:statusFor(old.stage,old)});return x;
  }
  const at=Date.now(),a={version:1,fingerprintVersion:2,stage:'not',fingerprint,epoch:crypto.randomUUID(),accounting:{at,actor:'บัญชีตรวจผ่านจากช่องคำสั่งในตาราง'},history:[...(old?.history||[]),...(old?[{stage:old.stage,accounting:old.accounting,not:old.not,may:old.may,fingerprint:old.fingerprint}]:[])].slice(-10)};
  await eStateWrite(owner.env,x,a,{[EF.request]:false,[EF.delivery]:'รอส่งให้นอต'});return x;
@@ -102,16 +107,16 @@ async function ePatch(owner,key,saved,c){const hash=await digest(c);if(saved.ren
 const eDocumentUrl=(x,nonce,stage,env)=> (env?.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-document&k='+encodeURIComponent(nonce)+'&id='+encodeURIComponent(x.id)+'&stage='+stage;
 function eDescription(x){return '**'+eMd(EXTERNAL_TABLES[x.kind].label)+' • '+eMd(x.r.fields[ED.number]||x.doc)+'**\n'+eMd(x.company?.name||'ยังไม่ระบุบริษัท')+'\n'+eMd(x.detail)+(x.machine?' • '+eMd(x.machine):'')+'\nผู้รับ: '+eMd(x.name)+' • **'+eMoney(x.amount)+' '+x.currency+'**\n'+eMd(x.bank)+' • '+eMd(x.paymentInstructions||x.account)+'\n'+(x.peak?'[ดู PEAK เดิม]('+x.peak+') | ':'')+'[เปิดรายการและหลักฐาน]('+eUrl(x)+')';}
 async function eRender(saved,all){
- const elements=[ePara('บัญชีเช็ก → นอตตรวจ → เมย์อนุมัติ → กลับนอตโอน\nปุ่มใช้ได้เฉพาะ'+(saved.stage==='not'?'นอต':'เมย์')+' • การอนุมัติยังไม่ใช่การโอนเงิน')];let pending=0;
+ const elements=[ePara(saved.delegate?'สิทธิ์เฉพาะใบนี้ • ระบบบันทึกนอตเป็นผู้อนุมัติแทนเมย์': 'บัญชีเช็ก → นอตตรวจ → เมย์อนุมัติ → กลับนอตโอน\nปุ่มใช้ได้เฉพาะ'+(saved.stage==='not'?'นอต':'เมย์')+' • การอนุมัติยังไม่ใช่การโอนเงิน')];let pending=0;
  for(const sig of saved.signatures){const x=all.find(r=>r.id===sig.id);if(!x){elements.push(ePara('รายการต้นทางไม่พบ'));continue;}
   elements.push(ePara(eDescription(x)+'\n[เปิดใบขอจ่าย PDF]('+eDocumentUrl(x,saved.nonce,'request')+')'));const stage=await externalStage(x),same=x.audit?.epoch===sig.epoch&&await externalFingerprint(x)===sig.fingerprint;
   if(!same||['changed','blocked','documents'].includes(stage))elements.push(ePara('⚠️ ข้อมูลเปลี่ยนหรือไม่ครบ ให้บัญชีตรวจใหม่'));
-  else if(stage!==saved.stage)elements.push(ePara('✅ '+(eStatus[stage]||'สถานะเปลี่ยนแล้ว')));
+  else if(stage!==saved.stage)elements.push(ePara('✅ '+(statusFor(stage,x.audit)||'สถานะเปลี่ยนแล้ว')));
   else {pending++;if(saved.errors?.[x.id])elements.push(ePara('⚠️ '+eMd(saved.errors[x.id])));elements.push({tag:'action',actions:[eButton(saved.stage==='not'?'ตรวจผ่าน → ส่งเมย์':'อนุมัติ → ส่งนอตรอโอน',{externalFinance:true,nonce:saved.nonce,action:'accept',id:x.id}),eButton('ส่งกลับบัญชี',{externalFinance:true,nonce:saved.nonce,action:'return',id:x.id})]});}
  }
  elements.splice(1,0,ePara('เหลือให้ตรวจ '+pending+' / '+saved.signatures.length+' รายการ'));
  if(pending>1)elements.push({tag:'action',actions:[{...eButton((saved.stage==='not'?'ตรวจผ่าน':'อนุมัติ')+'ที่เหลือ '+pending+' รายการ',{externalFinance:true,nonce:saved.nonce,action:'accept-all'}),type:'primary',confirm:{title:ePlain('ยืนยัน '+pending+' รายการ'),text:ePlain('ตรวจเอกสาร บริษัท ยอด และบัญชีผู้รับครบแล้ว')}}]});
- return {card:eCard(saved.stage==='not'?'คู่ค้า / DEALPAY • รอนอตตรวจ':'คู่ค้า / DEALPAY • รอเมย์อนุมัติ',elements,saved.stage==='not'?'blue':'purple'),pending};
+ return {card:eCard(saved.delegate?'นอต • อนุมัติแทนเมย์เฉพาะใบนี้':saved.stage==='not'?'คู่ค้า / DEALPAY • รอนอตตรวจ':'คู่ค้า / DEALPAY • รอเมย์อนุมัติ',elements,saved.stage==='not'?'blue':'purple'),pending};
 }
 const eTransferUrl=(saved,env)=>(env.WORKER_URL||'https://accsp2026.organization-23c.workers.dev')+'/?act=external-transfers&k='+encodeURIComponent(saved.nonce);
 const transferSummary=x=>x.kind==='internal'?x.summary:expenseSummary([x.detail],x.note);
@@ -187,10 +192,11 @@ async function eTransferSummary(owner,all,recipient,unified=false){
  return {count:externalCount,sends,cards:current?1:0};
 }
 async function eReceipt(owner,saved,all){
+ const deliveryRole=saved.delegate?'delegate':saved.stage;
  if(!['not','may'].includes(saved.stage)||!saved.message||!saved.sentAt)return;
  for(const sig of saved.signatures){const x=all.find(r=>r.id===sig.id);if(!x||x.audit?.epoch!==sig.epoch||await externalFingerprint(x)!==sig.fingerprint)continue;
-  if(x.audit.delivery?.[saved.stage]?.message===saved.message)continue;
-  x.audit.delivery={...x.audit.delivery,[saved.stage]:{message:saved.message,at:saved.sentAt}};
+  if(x.audit.delivery?.[deliveryRole]?.message===saved.message)continue;
+  x.audit.delivery={...x.audit.delivery,[deliveryRole]:{message:saved.message,at:saved.sentAt}};
   const at=new Date(saved.sentAt).toLocaleString('en-GB',{timeZone:'Asia/Bangkok',hour12:false});
   await eWrite(owner.env,x,{[EF.audit]:JSON.stringify(x.audit),...(saved.stage==='not'?{[EF.delivery]:'ส่งแล้ว • '+at}:{})});
  }
@@ -217,30 +223,31 @@ export async function externalTick(owner,{unified=false}={}){
   }
   if(x.r.fields[EF.request]===true)x=all[i]=await externalAccounting(owner,x);
   if(!x.audit)continue;const stage=await externalStage(x);
-  const status=stage==='changed'?'ข้อมูลรายการเปลี่ยน • ให้บัญชีตรวจใหม่':stage==='blocked'?'ข้อมูลไม่ครบ • '+externalProblem(x):eStatus[stage];
+  const status=stage==='changed'?'ข้อมูลรายการเปลี่ยน • ให้บัญชีตรวจใหม่':stage==='blocked'?'ข้อมูลไม่ครบ • '+externalProblem(x):statusFor(stage,x.audit);
   if(status&&textOf(x.r.fields[EF.status])!==status)await eWrite(owner.env,x,{[EF.status]:status,...(['changed','blocked'].includes(stage)?{[EF.not]:false,[EF.may]:false}:{})});
  }
  const transfer=await eTransferSummary(owner,all,recipients.not,unified);
  let sends=transfer.sends;const counts={not:0,may:0,transfer:transfer.count};
- for(const stage of ['not','may']){
-  const recipient=stage==='may'?recipients.may:recipients.not,active=[],covered=new Set();
-  for(const key of await owner.ctx.storage.get('external:active:'+stage)||[]){
+ for(const route of ['delegate','not','may']){
+  const delegate=route==='delegate',stage=delegate?'may':route;
+  const recipient=route==='may'?recipients.may:recipients.not,active=[],covered=new Set();
+  for(const key of await owner.ctx.storage.get('external:active:'+route)||[]){
    const saved=await owner.ctx.storage.get(key);if(!saved?.message)continue;
    let pending;
    const render=await eRender(saved,all);await ePatch(owner,key,saved,render.card);pending=render.pending;await eReceipt(owner,saved,all);
    if(pending&&saved.recipient===recipient&&Date.now()-saved.created<7*86400000){active.push(key);for(const s of saved.signatures){const x=all.find(r=>r.id===s.id);if(x&&x.audit?.epoch===s.epoch&&await externalFingerprint(x)===s.fingerprint&&await externalStage(x)===stage)covered.add(x.id);}}
    else {saved.retired=true;await owner.ctx.storage.put(key,saved);}
   }
-  const remaining=[];for(const x of all)if(await externalStage(x)===stage){counts[stage]++;if(!covered.has(x.id))remaining.push(x);}
+  const remaining=[];for(const x of all)if((!delegate||permitsDelegate(x))&&await externalStage(x)===stage){if(!delegate)counts[stage]++;if(!covered.has(x.id))remaining.push(x);}
   remaining.sort((a,b)=>a.kind.localeCompare(b.kind)||a.company.id.localeCompare(b.company.id)||a.id.localeCompare(b.id));
   for(let i=0;i<remaining.length&&sends<4;i+=5){
    const rows=remaining.slice(i,i+5),signatures=await Promise.all(rows.map(async x=>({id:x.id,fingerprint:await externalFingerprint(x),epoch:x.audit.epoch})));
-   const key='external:card:'+stage+':'+await digest([signatures,recipient,Math.floor(Date.now()/(7*86400000))]);let saved=await owner.ctx.storage.get(key);
-   if(!saved){saved={version:1,stage,recipient,signatures,nonce:crypto.randomUUID(),created:Date.now()};await owner.ctx.storage.put(key,saved);await owner.ctx.storage.put('external:nonce:'+saved.nonce,key);}
+   const key='external:card:'+route+':'+await digest([signatures,recipient,Math.floor(Date.now()/(7*86400000))]);let saved=await owner.ctx.storage.get(key);
+   if(!saved){saved={version:1,stage,delegate,recipient,signatures,nonce:crypto.randomUUID(),created:Date.now()};await owner.ctx.storage.put(key,saved);await owner.ctx.storage.put('external:nonce:'+saved.nonce,key);}
    if(!saved.message){const c=(await eRender(saved,rows)).card;saved.message=await eSend(owner.env,recipient,c,key);saved.sentAt=Date.now();saved.renderHash=await digest(c);await owner.ctx.storage.put(key,saved);sends++;}
    await eReceipt(owner,saved,all);active.push(key);
   }
-  await owner.ctx.storage.put('external:active:'+stage,active);
+  await owner.ctx.storage.put('external:active:'+route,active);
  }
  const transferCards=transfer.cards;await owner.ctx.storage.put('external:lastPoll',{at:Date.now(),counts,sends,transferCards});console.log('EXTERNAL_FINANCE_POLL',JSON.stringify({counts,sends,transferCards}));return {ok:true,counts,sends,transferCards};
 }
@@ -248,16 +255,19 @@ export async function externalCallback(owner,b){
  if(owner.env.FINANCE_ENABLED!=='true'||!verifiedCallback(owner.env,b))throw Error('Unauthorized callback');
  const v=b.event?.action?.value||{},actor=b.event?.operator?.open_id,key=await owner.ctx.storage.get('external:nonce:'+v.nonce),saved=key&&await owner.ctx.storage.get(key);
  if(!saved||saved.retired||saved.recipient!==actor||!['not','may'].includes(saved.stage)||!['accept','accept-all','return'].includes(v.action)||Date.now()-saved.created>7*86400000)return {ignored:true};
- const recipients=await people(owner.env);if(actor!==recipients[saved.stage])return {ignored:true};
+ const recipients=await people(owner.env);if(actor!==recipients[saved.delegate?'not':saved.stage])return {ignored:true};
  const all=await externalSnapshot(owner.env),results=[];saved.errors=saved.errors||{};
  for(const sig of saved.signatures.filter(s=>v.action==='accept-all'||v.id===s.id)){
   try{
    const original=all.find(x=>x.id===sig.id);if(!original)throw Error('ไม่พบรายการ');const x=await eFresh(owner.env,original);const stage=await externalStage(x);
    if(x.audit?.epoch!==sig.epoch||await externalFingerprint(x)!==sig.fingerprint)throw Error('ข้อมูลเปลี่ยน ให้บัญชีตรวจใหม่');
+   if(saved.delegate&&(!permitsDelegate(x)||saved.stage!=='may'||v.action==='accept-all'))throw Error('สิทธิ์อนุมัติแทนไม่ตรงรายการ');
    if(stage!==saved.stage){results.push({id:x.id,already:true});continue;}
    const a={...x.audit};if(v.action==='return'){a.stage='returned';a.returned={actor,at:Date.now(),from:saved.stage};delete a.not;delete a.may;}
    else if(saved.stage==='not'){a.not={actor,at:Date.now()};a.stage='may';}
-   else {if(a.not?.actor!==recipients.not)throw Error('ไม่พบผลตรวจของนอต');a.may={actor,at:Date.now()};a.stage='transfer';}
+   else {if(a.not?.actor!==recipients.not)throw Error('ไม่พบผลตรวจของนอต');a.may={actor,at:Date.now()};
+    if(saved.delegate){a.may.delegated=true;await owner.ctx.storage.put('external:delegate-decision:'+a.epoch,{actor,at:a.may.at,fingerprint:sig.fingerprint,id:x.id});}
+    a.stage='transfer';}
    await eStateWrite(owner.env,x,a);Object.assign(original,x);delete saved.errors[x.id];results.push({id:x.id,ok:true});
   }catch(e){saved.errors[sig.id]=String(e.message||e);results.push({id:sig.id,ok:false,error:saved.errors[sig.id]});}
  }

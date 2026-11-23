@@ -366,7 +366,7 @@ export async function unifiedDocumentAccess(owner,b){
 export async function externalDocumentAccess(owner,b,session){
  const key=await owner.ctx.storage.get('external:nonce:'+b.k),saved=session||(key&&await owner.ctx.storage.get(key));
  if(!saved||saved.retired||Date.now()-saved.created>7*86400000||!['not','may','transfer'].includes(saved.stage))throw Error('ลิงก์หมดอายุ');
- const recipients=await people(owner.env);if(saved.recipient!==recipients[saved.stage==='may'?'may':'not'])throw Error('ไม่มีสิทธิ์');
+ const recipients=await people(owner.env);if(saved.recipient!==recipients[saved.stage==='may'&&!saved.delegate?'may':'not'])throw Error('ไม่มีสิทธิ์');
  const [kind,rid]=String(b.id||'').split(':');if(!EXTERNAL_TABLES[kind]||!/^rec[a-zA-Z0-9]+$/.test(rid))throw Error('รายการไม่ถูกต้อง');
  const x=await eFresh(owner.env,{kind,table:EXTERNAL_TABLES[kind].table,r:{record_id:rid}}),hash=await externalFingerprint(x);
  return readExternalDocument(owner,saved,x,b.stage,hash);

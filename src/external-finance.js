@@ -81,10 +81,12 @@ export async function externalStage(x){
  return 'blocked';
 }
 const eStatus={documents:'รอสร้างเอกสาร PDF',accounting:'รอบัญชีเช็ก',not:'บัญชีเช็กแล้ว • รอนอตตรวจ',may:'นอตตรวจผ่าน • รอเมย์อนุมัติ',transfer:'เมย์อนุมัติแล้ว • รอนอตโอน',returned:'ส่งกลับให้บัญชีตรวจใหม่',closed:'บันทึกโอนแล้ว'};
-// One reviewed snapshot only. A resubmission needs its own authorization.
-const delegatedSnapshot='f9bafaa2b570faeb137c462e012bd3db77ef4531d08f9351c206b57cd9d5bfa4';
-const delegatedEpoch='d76c44d0-66c9-4e21-a9b9-d7a076b37d4c';
-const permitsDelegate=x=>x.kind==='partner'&&x.audit?.fingerprint===delegatedSnapshot&&x.audit?.epoch===delegatedEpoch;
+// Reviewed requests are identified by both the financial snapshot and its approval cycle.
+const delegatedRequests=new Map([
+ ['d76c44d0-66c9-4e21-a9b9-d7a076b37d4c','f9bafaa2b570faeb137c462e012bd3db77ef4531d08f9351c206b57cd9d5bfa4'],
+ ['6d0245ad-6eb5-479a-897e-fc4fb14ada8e','a65607dc079a83a316fe1d26c490cc260a1dce450cd114b66ae491a9402562c5']
+]);
+const permitsDelegate=x=>x.kind==='partner'&&delegatedRequests.has(x.audit?.epoch)&&delegatedRequests.get(x.audit.epoch)===x.audit.fingerprint;
 const statusFor=(stage,a)=>stage==='transfer'&&a?.may?.delegated?'นอตอนุมัติแทนเมย์แล้ว • รอนอตโอน':eStatus[stage];
 async function eList(env,table){let out=[],page='';do{const d=await api(env,recordsPath(table)+'?page_size=500'+(page?'&page_token='+encodeURIComponent(page):''));out.push(...d.items||[]);page=d.has_more?d.page_token:'';}while(page);return out;}
 export async function externalSnapshot(env){return (await Promise.all(Object.entries(EXTERNAL_TABLES).map(async([kind,t])=>(await eList(env,t.table)).map(r=>externalRow(kind,r))))).flat();}

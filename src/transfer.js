@@ -102,6 +102,16 @@ export async function portalAction(owner,b,session){
  if(test)throw Error('TEST ดูและคัดลอกตัวอย่างได้ แต่ไม่รับสลิปจริงและไม่เปลี่ยนสถานะจ่าย');
  if(b.op==='resume')return {ok:true,drafts:await resumeDrafts(owner,saved)};
  if(b.op==='reread')return rereadDraft(owner,b.draft,saved);
+ if(b.op==='discard'){
+  const d=await ctx.storage.get('draft:'+b.draft)||await ctx.storage.get('external:draft:'+b.draft);
+  if(!d)return {ok:true};
+  if(d.owner!==saved.recipient)throw Error('ไม่มีสิทธิ์');
+  if(await ctx.storage.get('paidHash:'+d.hash)||await ctx.storage.get(d.refKey))throw Error('สลิปอยู่ระหว่างยืนยันหรือบันทึกแล้ว');
+  const keys=['draft:'+d.id,'external:draft:'+d.id];
+  if((await ctx.storage.get('draftHash:'+d.hash))?.id===d.id)keys.push('draftHash:'+d.hash);
+  await ctx.storage.delete(keys);
+  return {ok:true};
+ }
  if(b.op==='reference')return reviewDraftReference(owner,b.draft,b.ref,saved);
  if(b.op==='prepare'){
   if(!['image/jpeg','image/png','image/webp'].includes(b.mime)||typeof b.image!=='string'||b.image.length>9*1024*1024)throw Error('รับ JPG/PNG/WebP ไม่เกิน 6 MB ต่อใบ');
@@ -158,7 +168,7 @@ const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function api(op,p={}){const r=await fetch('/?act=transfer-api',{method:'POST',signal:AbortSignal.timeout(['rows','resume'].includes(op)?45000:180000),headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN,op,...p})});const j=await r.json();if(!j.ok)throw Error(j.error||'ไม่สำเร็จ');return j;}
 async function copy(v,b){try{await navigator.clipboard.writeText(v);b.textContent='คัดลอกแล้ว ✓';setTimeout(()=>b.textContent=b.dataset.label,1600);}catch{prompt('คัดลอกข้อมูลนี้',v);}}
 function totalText(items){return [...new Set(items.map(r=>r.currency))].map(currency=>fmt(items.filter(r=>r.currency===currency).reduce((s,r)=>s+Math.round(r.amount*100),0)/100)+' '+currency).join(' + ')||'0.00 THB';}
-function renderQueue(){const root=$('queue');root.innerHTML='';$('summary').innerHTML='<strong>รอโอนทั้งหมด '+rows.length+' รายการ</strong><div class="amount">'+esc(totalText(rows))+'</div><div class="muted">เบิกภายใน '+rows.filter(r=>!r.kind||r.kind==='internal').length+' รายการ • คู่ค้า '+rows.filter(r=>r.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(r=>r.kind==='dealpay').length+' รายการ</div>';for(const cid of [...new Set(rows.map(r=>r.company_id))]){const group=rows.filter(r=>r.company_id===cid),s=document.createElement('section');s.innerHTML='<h2>'+esc(group[0].company)+'</h2><p>'+group.length+' รายการโอน • '+group.reduce((n,r)=>n+r.bills,0)+' บิล • รวม '+esc(totalText(group))+'</p><div class="grid"></div>';for(const r of group){const a=document.createElement('article');a.innerHTML='<strong>'+esc(r.name)+'</strong><div>'+esc(r.bank)+' · '+esc(r.account)+'</div><div class="amount">'+fmt(r.amount)+' '+esc(r.currency)+'</div><div class="muted">'+esc(r.doc)+' • '+r.bills+' บิล</div><p class="expense-summary">รายการ: '+esc(r.summary)+'</p>'+(r.hasSlip?'<p class="warn">มีสลิปอยู่แล้ว ตรวจรายการก่อนโอนซ้ำ</p>':'')+'<p class="actions"><button data-label="คัดลอกบัญชี">คัดลอกบัญชี</button><button data-label="คัดลอกยอด">คัดลอกยอด</button><button data-label="คัดลอกรายการ">คัดลอกรายการ</button></p><a target="_blank" rel="noopener noreferrer" href="'+esc(r.pdf)+'">ดู PDF รวมไฟล์แนบ</a>'+(r.originalPdf?' • <a target="_blank" rel="noopener noreferrer" href="'+esc(r.originalPdf)+'">PDF ต้นฉบับ</a>':'');const b=a.querySelectorAll('button');b[0].onclick=()=>copy(dg(r.account),b[0]);b[1].onclick=()=>copy(r.amount.toFixed(2),b[1]);b[2].onclick=()=>copy(r.summary,b[2]);s.querySelector('.grid').append(a);}root.append(s);}if(!rows.length)root.textContent='ไม่มีรายการรอโอน';}
+function renderQueue(){const root=$('queue');root.innerHTML='';$('summary').innerHTML='<strong>รอโอนทั้งหมด '+rows.length+' รายการ</strong><div class="amount">'+esc(totalText(rows))+'</div><div class="muted">เบิกภายใน '+rows.filter(r=>!r.kind||r.kind==='internal').length+' รายการ • คู่ค้า '+rows.filter(r=>r.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(r=>r.kind==='dealpay').length+' รายการ</div>';for(const cid of [...new Set(rows.map(r=>r.company_id))]){const group=rows.filter(r=>r.company_id===cid),s=document.createElement('section');s.innerHTML='<h2>'+esc(group[0].company)+'</h2><p>'+group.length+' รายการโอน • '+group.reduce((n,r)=>n+r.bills,0)+' บิล • รวม '+esc(totalText(group))+'</p><div class="grid"></div>';for(const r of group){const a=document.createElement('article');a.innerHTML='<strong>'+esc(r.name)+'</strong><div>'+esc(r.bank)+' · '+esc(r.paymentInstructions||r.account)+'</div><div class="amount">'+fmt(r.amount)+' '+esc(r.currency)+'</div><div class="muted">'+esc(r.doc)+' • '+r.bills+' บิล</div><p class="expense-summary">รายการ: '+esc(r.summary)+'</p>'+(r.hasSlip?'<p class="warn">มีสลิปอยู่แล้ว ตรวจรายการก่อนโอนซ้ำ</p>':'')+'<p class="actions"><button data-label="คัดลอกบัญชี">คัดลอกบัญชี</button><button data-label="คัดลอกยอด">คัดลอกยอด</button><button data-label="คัดลอกรายการ">คัดลอกรายการ</button></p><a target="_blank" rel="noopener noreferrer" href="'+esc(r.pdf)+'">ดู PDF รวมไฟล์แนบ</a>'+(r.originalPdf?' • <a target="_blank" rel="noopener noreferrer" href="'+esc(r.originalPdf)+'">PDF ต้นฉบับ</a>':'');const b=a.querySelectorAll('button');b[0].hidden=!!r.paymentInstructions;b[0].onclick=()=>copy(dg(r.account),b[0]);b[1].onclick=()=>copy(r.amount.toFixed(2),b[1]);b[2].onclick=()=>copy(r.summary,b[2]);s.querySelector('.grid').append(a);}root.append(s);}if(!rows.length)root.textContent='ไม่มีรายการรอโอน';}
 async function load(){try{const j=await api('rows');rows=j.rows;test=j.test;$('notice').textContent=test?'TEST • ห้ามโอนเงินจริง • หน้านี้ดูและคัดลอกเพื่อทดสอบเท่านั้น ไม่บันทึกจ่าย':'เลือกบริษัทให้ตรงกับบัญชีที่ใช้โอน แล้วคัดลอกบัญชีและยอดไปโอนผ่านธนาคาร';$('files').disabled=test||busy;renderQueue();renderSlips();}catch(e){$('notice').textContent=e.message;}}
 ${accountFits.toString()}
 ${bankCode.toString()}
@@ -192,6 +202,14 @@ function renderSlips(){
    if(!choices.length&&s.company){const near=rows.filter(r=>!r.hasSlip&&r.company_id===s.company&&Math.round(r.amount*100)===Math.round(Number(o.amount)*100)&&accountFits(o.recipient_acct_mask||o.recipient_acct,r.account));if(near.length)info.textContent='บัญชีและยอดตรง แต่ธนาคารไม่ตรง: สลิป '+o.recipient_bank+' / รายการ '+near.map(r=>r.bank).join(', ')+' — กรุณาตรวจข้อมูล';}
    box.append(info);
    if(s.error){const retry=document.createElement('button');retry.textContent='อ่านสลิปนี้ใหม่';retry.disabled=busy;retry.onclick=async()=>{busy=true;renderSlips();try{const j=await api('reread',{draft:s.draft.id});s.draft=j.draft;s.url=j.preview;s.error='';}catch(e){s.error=e.message;}busy=false;renderSlips();};box.append(retry);}
+  }
+  if(!s.done){
+   const remove=document.createElement('button');remove.textContent='ลบสลิปนี้';remove.disabled=busy;
+   remove.onclick=async()=>{if(busy)return;busy=true;$('confirmPaid').checked=false;renderSlips();
+    try{if(s.draft)await api('discard',{draft:s.draft.id});slips=slips.filter(item=>item!==s);}
+    catch(e){$('progress').textContent=e.message;}
+    finally{busy=false;renderSlips();}
+   };box.append(remove);
   }
   root.append(el);
  }

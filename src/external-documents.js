@@ -27,7 +27,9 @@ export async function uploadExternalPdf(env,data,name){
 export async function ensureExternalDocument(owner,x,stage,services){
  const hash=await services.fingerprint(x);if(await documentCurrent(x,stage,hash))return x;
  if(stage!=='request'&&(!x.audit?.not?.actor||!x.audit?.may?.actor||x.audit.fingerprint!==hash))throw Error('ยังไม่มีผลอนุมัติที่ตรงกับข้อมูล');
- if(stage==='paid'&&(!x.audit?.paid?.ref||!(x.r.fields['หลักฐานการโอน']||[]).some(a=>a.file_token===x.audit.paid.file)))throw Error('ยังไม่มีหลักฐานโอนที่ยืนยันแล้ว');
+ const paid=x.audit?.paid;
+ const reviewedManually=!!paid?.actor&&paid.manual?.by===paid.actor&&Array.isArray(paid.manual.target);
+ if(stage==='paid'&&(!(paid?.ref||reviewedManually)||!(x.r.fields['หลักฐานการโอน']||[]).some(a=>a.file_token===x.audit.paid.file)))throw Error('ยังไม่มีหลักฐานโอนที่ยืนยันแล้ว');
  const signature=await documentSignature(x,hash,stage),store=owner.ctx.storage,key='external:document:'+x.id+':'+signature+':pdf:'+EXTERNAL_PDF_TEMPLATE_VERSION,seqKey='external:document-seq:'+x.id;
  let job=await store.get(key);
  if(job&&stage!=='request'&&!job.model.signing){job.model.signing=await prepareSigningProfile(owner,x,await documentContext(owner));delete job.file;await store.put(key,job);}

@@ -1,3 +1,4 @@
+import {groupedInternalTransfers} from '../src/transfer.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {externalTableReview,EF,EXTERNAL_TABLES,externalRow,externalFingerprint,externalProblem,externalStage,externalTick as poll,externalCallback,externalPortalAction,externalSlipFits,externalTransferPage} from '../src/external-finance.js';
@@ -300,5 +301,23 @@ test('table review requires an authenticated field edit by the assigned reviewer
   assert.equal(externalRow('partner',r).audit.stage,'may');
   r.fields[EF.may]=true;at=Math.ceil(Date.now()/1000);await submit('ou_may','may',at);await poll(h.owner);
   assert.equal(await externalStage(externalRow('partner',r)),'transfer');
+ }finally{h.restore();}
+});
+
+test('urgent vouchers become one payable per company only once its full set is approved',async()=>{
+ const h=harness();try{
+  const ids=['13253992','0214ABC3','87B1F0C2','5F1C09E0','B48D04D6','D0D18E89','38F60B2E','9C0BB2BF','3681A606','2D1FD472','238D73B5','5D078123','1F2378C5','BD3AE734','C10D33F0','A6FF7CF4','4F91B02B'];
+  const amounts=[20,20,32,37,37,33,25,20,30,30,27,33,42,20,300,42,52];
+  const all=ids.map((suffix,i)=>{
+   const {r,j}=readyInternal(),cid=i===15?'PSH':'PWA';
+   j.summaryId=r.record_id='rec'+suffix;j.company={id:cid,name:cid};j.docNo=cid+'-20261124-'+suffix;
+   j.key='k'+suffix;j.items[0].amount=amounts[i];
+   Object.assign(r.fields,{'รหัสงานระบบ':j.key,'บริษัท':cid,'รหัสบริษัท':cid,'เลขใบขอเบิก':j.docNo,'ยอดรวม':amounts[i]});
+   return {r,j};
+  });
+  const rows=await groupedInternalTransfers(h.owner,all);
+  assert.deepEqual(rows.map(r=>[r.company_id,r.bills,r.amount]),[['PWA',16,758],['PSH',1,42]]);
+  all[0].r.fields.Approve=false;
+  assert.deepEqual((await groupedInternalTransfers(h.owner,all)).map(r=>r.amount),[42]);
  }finally{h.restore();}
 });

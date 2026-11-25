@@ -6,6 +6,9 @@ import {CFG} from './config.js';
 const output='ชุดตรวจเบิกด่วน PDF';
 // Membership of the historical batch was verified against the original vouchers.
 const historical=new Set(["ee6a49615bd08d23ffb4", "6fb199b6a6e5f843326d", "bbb43a504f9d1e7c25e8", "8da96aad75e69c72b63e", "56760e89d77fffb8dcff", "d28a39866c974254f2ef", "7c58fc6da75a36832974", "a5b8cfd5a5b3ab3fe6e0", "6c2bd43894d01a1524ce", "0a82fbb7de3d4a0a6724", "3f64616c2f5675312a80", "c768e2dc7302dc1729d8", "9d16a8bc38e29f73eb5a", "53ee551494d8cbb20b96", "42b92905fc9d83255608", "e951d1869e0fc7bf4e43", "8656011a632c79e7cbdc"]);
+export async function historicalUrgentVoucher(docNo){
+ return historical.has((await digest(docNo)).slice(0,20));
+}
 function driveId(url){
  const u=new URL(url);
  if(u.protocol!=='https:'||u.hostname!=='drive.google.com')throw Error('Unexpected evidence host');

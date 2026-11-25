@@ -9,7 +9,7 @@ import {transferPage,portalAuth,portalAction,groupedInternalTransfers,slipFits} 
 import {expenseSummary} from './expense-summary.js';
 import {internalTransferDocument} from './internal-transfer-document.js';
 
-export const EXTERNAL_FLOW_VERSION='external-flow-v4-document-payment';
+export const EXTERNAL_FLOW_VERSION='finance-v5-internal-table-review';
 export const EF={request:'บัญชีเช็กแล้ว → ส่งให้นอต',status:'สถานะงาน',not:'นอตตรวจผ่าน',may:'เมย์อนุมัติ',delivery:'หลักฐานส่งให้นอต',audit:'ข้อมูล Flow (ระบบ)'};
 export const EXTERNAL_TABLES={
  partner:{table:'tbldczVhrFWfJ5ze',label:'คู่ค้า',doc:'รายการเบิก',company:'ชื่อบริษัท',name:'ชื่อบริษัทคู่ค้าผู้รับเงิน',amount:'ยอดโอนเงิน',account:'เลขบัญชีผู้รับเงิน',detail:'ชื่อรายการ',attachments:['เอกสารแนบ']},

@@ -268,6 +268,34 @@ export async function externalTick(owner,{unified=false}={}){
  }
  const transferCards=transfer.cards;await owner.ctx.storage.put('external:lastPoll',{at:Date.now(),counts,sends,transferCards});console.log('EXTERNAL_FINANCE_POLL',JSON.stringify({counts,sends,transferCards}));return {ok:true,counts,sends,transferCards};
 }
+// Lark supplies the editor and the changed fields in its authenticated record event.
+export function isPartnerReviewEvent(env,body){
+ const h=body?.header,e=body?.event;
+ return env.FINANCE_ENABLED==='true'&&!!env.LARK_VERIFICATION_TOKEN&&
+  h?.token===env.LARK_VERIFICATION_TOKEN&&h.app_id===CFG.LARK_APP_ID&&
+  h.event_type==='drive.file.bitable_record_changed_v1'&&!!h.event_id&&
+  e?.file_type==='bitable'&&e.file_token===CFG.BASE_TOKEN&&e.table_id===EXTERNAL_TABLES.partner.table;
+}
+export async function externalTableReview(owner,body){
+ if(!isPartnerReviewEvent(owner.env,body))return;
+ const e=body.event,actor=e.operator_id?.open_id,at=Number(e.update_time)*1000;
+ if(!actor||!Number.isSafeInteger(at)||at<=0||actor!==(await people(owner.env)).not)return;
+ const table=e.table_id;
+ const fields=await api(owner.env,recordsPath(table).replace(/\/records$/,'/fields')+'?page_size=100');
+ const field=fields.items.find(f=>f.field_name===EF.not&&f.type===7)?.field_id;
+ if(!field)return;
+ for(const action of e.action_list||[]){
+  if(action.action!=='record_edited'||!/^rec[a-zA-Z0-9]+$/.test(action.record_id))continue;
+  const before=action.before_value?.find(v=>v.field_id===field),after=action.after_value?.find(v=>v.field_id===field);
+  if(after?.field_value!=='true'||before?.field_value==='true')continue;
+  const x=await eFresh(owner.env,{kind:'partner',table,r:{record_id:action.record_id}});
+  if(x.r.fields[EF.not]!==true||await externalStage(x)!=='not')continue;
+  // Never apply a delayed event to a new accounting submission or an unseen request.
+  const sent=x.audit.delivery?.not?.at;
+  if(!sent||at<sent||at<x.audit.accounting.at)continue;
+  await eStateWrite(owner.env,x,{...x.audit,stage:'may',not:{actor,at,source:'lark_table',eventId:body.header.event_id}});
+ }
+}
 export async function externalCallback(owner,b){
  if(owner.env.FINANCE_ENABLED!=='true'||!verifiedCallback(owner.env,b))throw Error('Unauthorized callback');
  const v=b.event?.action?.value||{},actor=b.event?.operator?.open_id,key=await owner.ctx.storage.get('external:nonce:'+v.nonce),saved=key&&await owner.ctx.storage.get(key);

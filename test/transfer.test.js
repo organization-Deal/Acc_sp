@@ -44,7 +44,7 @@ test('commit attaches evidence before completion, rejects wrong company and retr
  const j={key:'job',summaryId:'r1',state:'APPROVED',company:{id:'PSH',name:'Company'},employee:{name:'Employee',accountName:'Employee',accountNo:'8214214237',bankName:'SCB'},currency:'THB',docId:'doc',docNo:'D1',pdfUrl:'https://example.com/pdf',approvedPdf:'https://example.com/signed',items:[{amount:231}]};
  const r={record_id:'r1',fields:{'รหัสงานระบบ':'job','บริษัท':'Company','รหัสบริษัท':'PSH','ชื่อพนักงาน':'Employee','ชื่อบัญชี':'Employee','เลขบัญชี':'8214214237','ธนาคาร':'SCB','Doc ID':'doc','เลขใบขอเบิก':'D1','ใบขอเบิก PDF':{link:j.pdfUrl},'ยอดรวม':231,'จำนวนรายการ':1,'สถานะ':'อนุมัติแล้ว',Approve:true,'นอตตรวจผ่าน':true,'ผู้ตรวจสอบก่อนอนุมัติ':'NOT','เวลานอตตรวจผ่าน':123,'PDF อนุมัติแล้ว':{link:j.approvedPdf}}};
  const people=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
- const mem=new Map([['nonce:n','card'],['card',{stage:'transfer',recipient:'ou_not',created:Date.now()}],['draft:d',{owner:'ou_not',at:Date.now(),hash:'h',refKey:'ref1',file:'file1',ocr:{amount:231,currency:'THB',recipient_acct:'4237'}}]]);
+ const mem=new Map([['nonce:n','card'],['card',{stage:'transfer',recipient:'ou_not',created:Date.now()}],['draft:d',{owner:'ou_not',at:Date.now(),hash:'h',refKey:'ref1',ref:'BANK123',file:'file1',ocr:{amount:231,currency:'THB',recipient_acct:'4237'}}]]);
  const owner={env:{KV:{get:async()=> 'fake-token'}},ctx:{storage:{get:async k=>mem.get(k),put:async(k,v)=>mem.set(k,v)}}};
  globalThis.fetch=async(url,opt={})=>{let data;if(opt.method==='PUT'){const f=JSON.parse(opt.body).fields;writes.push(f);Object.assign(r.fields,f);data={record:r};}else if(url.includes(CFG.T_EMPLOYEE))data={items:people};else if(url.includes('tbljMfJTB5VIis8Y'))data={items:[{fields:{'ข้อมูลงาน JSON':JSON.stringify(j)}}]};else data=url.includes('/records/r1')?{record:structuredClone(r)}:{items:[structuredClone(r)]};return new Response(JSON.stringify({code:0,data}));};
  try{
@@ -101,14 +101,24 @@ test('reread recovers masked OCR from the saved image without uploading or chang
  };
  try{
   await assert.rejects(()=>rereadDraft(owner,'d',{recipient:'other'}),/หมดอายุ/);assert.equal(ocrCalls,0);
-  const r=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(r.draft.ocrVersion,2);assert.equal(r.draft.ocr.recipient_acct_mask,'xxx-x-x1234-x');assert.match(r.preview,/^data:image\/jpeg;base64,/);
+  const r=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(r.draft.ocrVersion,3);assert.equal(r.draft.ocr.recipient_acct_mask,'xxx-x-x1234-x');assert.match(r.preview,/^data:image\/jpeg;base64,/);
   await rereadDraft(owner,'d',{recipient:'not'});assert.equal(ocrCalls,1);assert.equal([...mem.keys()].some(k=>k.startsWith('paid')),false);
   mem.set('draft:d',{...d,ref:'DIFFERENT'});mem.set('ref',{id:'already-reserved'});await assert.rejects(()=>rereadDraft(owner,'d',{recipient:'not'}),/เลขอ้างอิง/);assert.equal(mem.get('draft:d').ocrVersion,undefined);
   mem.delete('ref');const corrected=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(corrected.draft.ref,'TRX123');assert.equal(corrected.draft.originalOcrRef,'DIFFERENT');
   const cached={...d,ref:'TRX123'};mem.set('draftHash:'+d.hash,cached);
   const reused=await portalAction(owner,{op:'prepare',image:'/9j/AA==',mime:'image/jpeg',filename:'original.jpg'},{stage:'transfer',recipient:'not'});
-  assert.equal(reused.draft.id,'d');assert.equal(reused.draft.ocrVersion,2);assert.equal(reused.draft.file,'saved-image');
+  assert.equal(reused.draft.id,'d');assert.equal(reused.draft.ocrVersion,3);assert.equal(reused.draft.file,'saved-image');
   mem.set('draft:d',{...d,ref:'REVIEWED123',referenceReviewedAt:Date.now()});
   const reviewed=await rereadDraft(owner,'d',{recipient:'not'});assert.equal(reviewed.draft.ref,'REVIEWED123');assert.equal(reviewed.draft.ocr.ref,'REVIEWED123');
  }finally{globalThis.fetch=real;}
+});
+
+test('reviewed account preserves visible zero and masked final digit',async()=>{
+ const draft={id:'d',hash:'h',owner:'not',at:Date.now(),ref:'BANK123',refKey:'old',ocr:{recipient_acct_mask:'xxx-x-xxxx-x'}};
+ const mem=new Map([['draft:d',draft]]);
+ const owner={ctx:{storage:{get:async k=>mem.get(k),put:async(k,v)=>mem.set(k,v)}}};
+ const {draft:updated}=await reviewDraftReference(owner,'d','BANK123',{recipient:'not'},'xxx-x-x0134-x');
+ assert.equal(updated.accountHistory[0].by,'not');
+ assert.ok(accountFits(updated.ocr.recipient_acct_mask,'1234501346'));
+ assert.equal(accountFits(updated.ocr.recipient_acct_mask,'1234501356'),false);
 });

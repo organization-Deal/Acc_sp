@@ -119,7 +119,7 @@ export async function reviewRows(saved,all,storage){
   else if(!same)x.reviewStatus='⚠️ ข้อมูลเปลี่ยน ต้องตรวจเอกสารฉบับล่าสุด';
   else if(stage==='returned')x.reviewStatus='↩️ ส่งกลับแก้ไขแล้ว';
   else if(f.Approve===true)x.reviewStatus='✅ เมย์อนุมัติแล้ว • '+(f['PDF อนุมัติแล้ว']?'ดูสถานะโอนในรายการ':md(f['สถานะระบบแยกบริษัท']||'รอสร้าง PDF อนุมัติ'));
-  else if(saved.stage==='not'&&f['นอตตรวจผ่าน']===true)x.reviewStatus='✅ นอตตรวจผ่านแล้ว → รอเมย์อนุมัติ';
+  else if(saved.stage==='not'&&stage==='may')x.reviewStatus='✅ นอตตรวจผ่านแล้ว → รอเมย์อนุมัติ';
   else if(done)x.reviewStatus=done.action==='return'?'↩️ ส่งกลับแก้ไขแล้ว':'✅ ทำรายการแล้ว • ตรวจสถานะล่าสุดในตาราง';
   else if(stage!==saved.stage||!epoch)x.reviewStatus='⚠️ สถานะเปลี่ยน ใช้การ์ดล่าสุด';
   if(!x.reviewStatus&&saved.errors?.[id])x.reviewError=saved.errors[id];

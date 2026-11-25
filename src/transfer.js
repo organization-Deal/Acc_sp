@@ -1,4 +1,4 @@
-import {snapshot,people,financeStage,checkedStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath} from './finance.js';
+import {snapshot,people,financeProblem,financeStage,checkedStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath} from './finance.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable,downloadMediaByToken} from './lark.js';
 import {CFG} from './config.js';
@@ -150,6 +150,15 @@ async function payableBeforeSigning(owner,r,j,cache={}){
   if(decision&&decision.actor===card.recipient&&decision.fingerprint===hash&&['accept','accept-all'].includes(decision.action))return true;
  }
  return false;
+}
+export async function novemberRunStatus(owner){
+ const result=[];
+ for(const {r,j} of await snapshot(owner.env)){
+  if(!j?.docNo?.includes('20261124')||!j.employee?.name?.includes('เมืองด้วง'))continue;
+  const previous={...r,fields:{...r.fields,Approve:false}};
+  result.push({doc:j.docNo,individual:separateNovemberRun(j),stage:financeStage(r,j),problem:financeProblem(r.fields,j,r.record_id),review:await checkedStage(previous,j),state:j.state,approved:r.fields.Approve===true});
+ }
+ return result;
 }
 // All unpaid vouchers in the same urgent run must clear review before it becomes payable.
 export async function groupedInternalTransfers(owner,all){

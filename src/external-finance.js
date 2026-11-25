@@ -5,7 +5,7 @@ import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
-import {transferPage,portalAuth,portalAction,groupedInternalTransfers,slipFits} from './transfer.js';
+import {transferPage,portalAuth,portalAction,groupedInternalTransfers,slipFits,confirmsTarget} from './transfer.js';
 import {expenseSummary} from './expense-summary.js';
 import {internalTransferDocument} from './internal-transfer-document.js';
 
@@ -367,16 +367,16 @@ export async function externalPortalAction(owner,b,session){
   if(!Array.isArray(b.pairs)||b.pairs.length<1||b.pairs.length>50)throw Error('เลือก 1–50 รายการ');const results=[],used=new Set();
   for(const p of b.pairs){try{
    const d=await ctx.storage.get('external:draft:'+p.draft);if(!d||d.owner!==saved.recipient||Date.now()-d.at>2*3600000)throw Error('สลิปหมดอายุ');
-   if(!d.ref)throw Error('กรอกเลขที่รายการจากธนาคารก่อนยืนยัน');
+   if(!d.ref&&!Array.isArray(p.manual))throw Error('กรอกเลขที่รายการจากธนาคารก่อนยืนยัน');
    const done=await ctx.storage.get('paidHash:'+d.hash);if(done){if(done.id===p.id){results.push({id:p.id,ok:true,already:true});continue;}throw Error('สลิปนี้ใช้กับรายการอื่นแล้ว');}
    if(used.has(p.id))throw Error('เลือกรายการซ้ำ');used.add(p.id);const prior=await ctx.storage.get(d.refKey);if(prior&&prior.id!==p.id)throw Error('เลขอ้างอิงใช้แล้ว');
    const [kind,rid]=String(p.id).split(':');if(!EXTERNAL_TABLES[kind]||!/^rec[a-zA-Z0-9]+$/.test(rid))throw Error('รายการไม่ถูกต้อง');
-   let x=await eFresh(env,{kind,table:EXTERNAL_TABLES[kind].table,r:{record_id:rid}});if(await externalStage(x)!=='transfer'||x.company.id!==p.company||!externalSlipFits(d.ocr,x))throw Error('บริษัท ยอด บัญชี หรือผลอนุมัติไม่ตรง');
+   let x=await eFresh(env,{kind,table:EXTERNAL_TABLES[kind].table,r:{record_id:rid}});if(await externalStage(x)!=='transfer'||x.company.id!==p.company||!(p.manual?confirmsTarget(p,{...x,company_id:x.company.id}):externalSlipFits(d.ocr,x)))throw Error('บริษัท ยอด บัญชี หรือผลอนุมัติไม่ตรง');
    const old=x.r.fields['หลักฐานการโอน']||[];if(old.length&&!old.some(f=>f.file_token===d.file))throw Error('มีหลักฐานอื่นอยู่แล้ว ตรวจใน Lark ก่อน');
-   const reservation={id:p.id,at:Date.now(),file:d.file};await ctx.storage.put(d.refKey,reservation);
+   const reservation={manual:p.manual?{by:saved.recipient,target:p.manual}:null,id:p.id,at:Date.now(),file:d.file};await ctx.storage.put(d.refKey,reservation);
    await eWrite(env,x,{'หลักฐานการโอน':[{file_token:d.file}],'เวลาที่แมต':Date.now()});
-   x=await eFresh(env,x);if(await externalStage(x)!=='transfer'||x.company.id!==p.company||!externalSlipFits(d.ocr,x))throw Error('ข้อมูลเปลี่ยนหลังแนบสลิป ยังไม่ปิดรายการ');
-   const a={...x.audit,paid:{at:Date.now(),ref:d.ref,file:d.file,actor:saved.recipient}};
+   x=await eFresh(env,x);if(await externalStage(x)!=='transfer'||x.company.id!==p.company||!(p.manual?confirmsTarget(p,{...x,company_id:x.company.id}):externalSlipFits(d.ocr,x)))throw Error('ข้อมูลเปลี่ยนหลังแนบสลิป ยังไม่ปิดรายการ');
+   const a={...x.audit,paid:{manual:reservation.manual,at:Date.now(),ref:d.ref,file:d.file,actor:saved.recipient}};
    await eWrite(env,x,{'รายการสำเร็จ':true,[EF.status]:eStatus.closed,[EF.audit]:JSON.stringify(a)});await ctx.storage.put('paidHash:'+d.hash,reservation);results.push({id:p.id,ok:true});
   }catch(e){results.push({id:p.id,ok:false,error:e.message});}}
   return {ok:true,results};

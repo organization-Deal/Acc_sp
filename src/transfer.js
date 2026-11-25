@@ -1,4 +1,4 @@
-import {snapshot,people,financeStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath} from './finance.js';
+import {snapshot,people,financeStage,checkedStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath} from './finance.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable,downloadMediaByToken} from './lark.js';
 import {CFG} from './config.js';
@@ -130,10 +130,31 @@ export async function portalAuth(owner,k){
 async function queue(owner,test){return (await snapshot(owner.env)).filter(x=>financeStage(x.r,x.j)===(test?'test':'transfer'));}
 function view(x){const f=x.r.fields;return {id:x.r.record_id,doc:textOf(f['เลขใบขอเบิก']),company:x.j.company.name,company_id:x.j.company.id,name:x.j.employee.accountName,bank:x.j.employee.bankName,account:x.j.employee.accountNo,amount:Number(f['ยอดรวม']),currency:x.j.currency,bills:x.j.items.length,summary:expenseSummary(x.j.items,textOf(f['สรุปค่าใช้จ่าย'])),pdf:x.j.approvedPdf,hasSlip:!!f['หลักฐานการโอน']?.length};}
 export async function internalTransferRows(owner){return (await queue(owner,false)).map(x=>({...view(x),kind:'internal',source:x}));}
+// The owner released this employee's 24 November run as individual vouchers.
+function separateNovemberRun(j){
+ return j?.employee?.recordId==='recvcZSeG1yESo'&&/^(PWA|PSH)-20261124-[0-9A-F]{8}$/.test(j.docNo);
+}
+async function payableBeforeSigning(owner,r,j,cache={}){
+ const f=r.fields;
+ if(!separateNovemberRun(j)||financeStage(r,j)!=='waiting'||f.Approve!==true||j.approvedPdf)return false;
+ // Recheck both previous review fingerprints on the exact current voucher.
+ const beforeApproval={...r,fields:{...f,Approve:false}};
+ if(await checkedStage(beforeApproval,j)!=='may')return false;
+ const hash=await fingerprint(r,j);
+ const receipt=textOf(f['หลักฐานส่งให้เมย์']).split(' • ').at(-1);
+ if(!receipt)return false;
+ const cards=cache.cards??=await owner.ctx.storage.list({prefix:'card:v3:may:'});
+ for(const card of cards.values()){
+  if(card.message!==receipt||!card.sent)continue;
+  const decision=await owner.ctx.storage.get('decision:'+card.nonce+':'+r.record_id);
+  if(decision&&decision.actor===card.recipient&&decision.fingerprint===hash&&['accept','accept-all'].includes(decision.action))return true;
+ }
+ return false;
+}
 // All unpaid vouchers in the same urgent run must clear review before it becomes payable.
 export async function groupedInternalTransfers(owner,all){
  all=all||await snapshot(owner.env);
- const ready=[],groups=new Map();
+ const ready=[],groups=new Map(),reviewCache={};
  const dateOf=j=>j?.docNo?.match(/^[^-]+-(\d{8})-/)?.[1];
  const payableDates=new Set(all.filter(x=>financeStage(x.r,x.j)==='transfer').map(x=>dateOf(x.j)).filter(Boolean));
  const candidates=all.filter(({j})=>payableDates.has(dateOf(j))&&j?.items?.length===1);
@@ -151,6 +172,12 @@ export async function groupedInternalTransfers(owner,all){
  for(const x of all){
   const {r,j}=x,stage=financeStage(r,j);
   if(!j||['closed','legacy','test','returned'].includes(stage))continue;
+  if(separateNovemberRun(j)){
+   if(stage==='transfer'||await payableBeforeSigning(owner,r,j,reviewCache)){
+    ready.push({...view(x),kind:'internal',source:x,pendingSignedPdf:stage!=='transfer'});
+   }
+   continue;
+  }
   const date=dateOf(j),urgent=urgentJobs.has(j.key);
   if(!urgent){if(stage==='transfer')ready.push({...view(x),kind:'internal',source:x});continue;}
   const e=j.employee||{};
@@ -247,7 +274,7 @@ export async function portalAction(owner,b,session){
    if(!(p.manual?confirmsTarget(p,view(x)):slipFits(d.ocr,view(x))))throw Error('ยอด สกุลเงิน หรือบัญชีผู้รับไม่ตรง');
    const fp=await fingerprint(x.r,x.j);
    x.r=(await api(env,recordsPath(SUMMARY)+'/'+p.id)).record;
-   if(financeStage(x.r,x.j)!=='transfer'||await fingerprint(x.r,x.j)!==fp)throw Error('ข้อมูลเปลี่ยน กรุณาโหลดใหม่');
+   if((financeStage(x.r,x.j)!=='transfer'&&!await payableBeforeSigning(owner,x.r,x.j))||await fingerprint(x.r,x.j)!==fp)throw Error('ข้อมูลเปลี่ยน กรุณาโหลดใหม่');
    const old=x.r.fields['หลักฐานการโอน']||[];
    if(old.length&&!old.some(f=>f.file_token===d.file))throw Error('มีหลักฐานอยู่แล้ว ต้องตรวจใน Lark ก่อนเพื่อไม่แนบทับ');
    const reserve={manual:p.manual?{by:saved.recipient,target:p.manual}:null,id:p.id,at:Date.now(),file:d.file};await ctx.storage.put(d.refKey,reserve);
@@ -268,7 +295,7 @@ const esc=v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&
 async function api(op,p={}){const r=await fetch('/?act=transfer-api',{method:'POST',signal:AbortSignal.timeout(['rows','resume'].includes(op)?45000:180000),headers:{'Content-Type':'application/json'},body:JSON.stringify({token:TOKEN,op,...p})});const j=await r.json();if(!j.ok)throw Error(j.error||'ไม่สำเร็จ');return j;}
 async function copy(v,b){try{await navigator.clipboard.writeText(v);b.textContent='คัดลอกแล้ว ✓';setTimeout(()=>b.textContent=b.dataset.label,1600);}catch{prompt('คัดลอกข้อมูลนี้',v);}}
 function totalText(items){return [...new Set(items.map(r=>r.currency))].map(currency=>fmt(items.filter(r=>r.currency===currency).reduce((s,r)=>s+Math.round(r.amount*100),0)/100)+' '+currency).join(' + ')||'0.00 THB';}
-function renderQueue(){const root=$('queue');root.innerHTML='';$('summary').innerHTML='<strong>รอโอนทั้งหมด '+rows.length+' รายการ</strong><div class="amount">'+esc(totalText(rows))+'</div><div class="muted">เบิกภายใน '+rows.filter(r=>!r.kind||r.kind==='internal').length+' รายการ • คู่ค้า '+rows.filter(r=>r.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(r=>r.kind==='dealpay').length+' รายการ</div>';for(const cid of [...new Set(rows.map(r=>r.company_id))]){const group=rows.filter(r=>r.company_id===cid),s=document.createElement('section');s.innerHTML='<h2>'+esc(group[0].company)+'</h2><p>'+group.length+' รายการโอน • '+group.reduce((n,r)=>n+r.bills,0)+' บิล • รวม '+esc(totalText(group))+'</p><div class="grid"></div>';for(const r of group){const a=document.createElement('article');a.innerHTML='<strong>'+esc(r.name)+'</strong><div>'+esc(r.bank)+' · '+esc(r.paymentInstructions||r.account)+'</div><div class="amount">'+fmt(r.amount)+' '+esc(r.currency)+'</div><div class="muted">'+esc(r.doc)+' • '+r.bills+' บิล</div><p class="expense-summary">รายการ: '+esc(r.summary)+'</p>'+(r.hasSlip?'<p class="warn">มีสลิปอยู่แล้ว ตรวจรายการก่อนโอนซ้ำ</p>':'')+'<p class="actions"><button data-label="คัดลอกบัญชี">คัดลอกบัญชี</button><button data-label="คัดลอกยอด">คัดลอกยอด</button><button data-label="คัดลอกรายการ">คัดลอกรายการ</button></p><a target="_blank" rel="noopener noreferrer" href="'+esc(r.pdf)+'">ดู PDF รวมไฟล์แนบ</a>'+(r.originalPdf?' • <a target="_blank" rel="noopener noreferrer" href="'+esc(r.originalPdf)+'">PDF ต้นฉบับ</a>':'');const b=a.querySelectorAll('button');b[0].hidden=!!r.paymentInstructions;b[0].onclick=()=>copy(dg(r.account),b[0]);b[1].onclick=()=>copy(r.amount.toFixed(2),b[1]);b[2].onclick=()=>copy(r.summary,b[2]);s.querySelector('.grid').append(a);}root.append(s);}if(!rows.length)root.textContent='ไม่มีรายการรอโอน';}
+function renderQueue(){const root=$('queue');root.innerHTML='';$('summary').innerHTML='<strong>รอโอนทั้งหมด '+rows.length+' รายการ</strong><div class="amount">'+esc(totalText(rows))+'</div><div class="muted">เบิกภายใน '+rows.filter(r=>!r.kind||r.kind==='internal').length+' รายการ • คู่ค้า '+rows.filter(r=>r.kind==='partner').length+' รายการ • DEALPAY '+rows.filter(r=>r.kind==='dealpay').length+' รายการ</div>';for(const cid of [...new Set(rows.map(r=>r.company_id))]){const group=rows.filter(r=>r.company_id===cid),s=document.createElement('section');s.innerHTML='<h2>'+esc(group[0].company)+'</h2><p>'+group.length+' รายการโอน • '+group.reduce((n,r)=>n+r.bills,0)+' บิล • รวม '+esc(totalText(group))+'</p><div class="grid"></div>';for(const r of group){const a=document.createElement('article');a.innerHTML='<strong>'+esc(r.name)+'</strong><div>'+esc(r.bank)+' · '+esc(r.paymentInstructions||r.account)+'</div><div class="amount">'+fmt(r.amount)+' '+esc(r.currency)+'</div><div class="muted">'+esc(r.doc)+' • '+r.bills+' บิล</div><p class="expense-summary">รายการ: '+esc(r.summary)+'</p>'+(r.hasSlip?'<p class="warn">มีสลิปอยู่แล้ว ตรวจรายการก่อนโอนซ้ำ</p>':'')+'<p class="actions"><button data-label="คัดลอกบัญชี">คัดลอกบัญชี</button><button data-label="คัดลอกยอด">คัดลอกยอด</button><button data-label="คัดลอกรายการ">คัดลอกรายการ</button></p><a target="_blank" rel="noopener noreferrer" href="'+esc(r.pdf)+'">'+(r.pendingSignedPdf?'ดูใบเบิกพร้อมไฟล์แนบ (รอ PDF ลงนาม)':'ดู PDF รวมไฟล์แนบ')+'</a>'+(r.originalPdf?' • <a target="_blank" rel="noopener noreferrer" href="'+esc(r.originalPdf)+'">PDF ต้นฉบับ</a>':'');const b=a.querySelectorAll('button');b[0].hidden=!!r.paymentInstructions;b[0].onclick=()=>copy(dg(r.account),b[0]);b[1].onclick=()=>copy(r.amount.toFixed(2),b[1]);b[2].onclick=()=>copy(r.summary,b[2]);s.querySelector('.grid').append(a);}root.append(s);}if(!rows.length)root.textContent='ไม่มีรายการรอโอน';}
 async function load(){try{const j=await api('rows');rows=j.rows;test=j.test;$('notice').textContent=test?'TEST • ห้ามโอนเงินจริง • หน้านี้ดูและคัดลอกเพื่อทดสอบเท่านั้น ไม่บันทึกจ่าย':'เลือกบริษัทให้ตรงกับบัญชีที่ใช้โอน แล้วคัดลอกบัญชีและยอดไปโอนผ่านธนาคาร';$('files').disabled=test||busy;renderQueue();renderSlips();}catch(e){$('notice').textContent=e.message;}}
 ${accountFits.toString()}
 ${bankCode.toString()}

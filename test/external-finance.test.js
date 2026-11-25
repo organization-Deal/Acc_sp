@@ -321,3 +321,17 @@ test('urgent vouchers become one payable per company only once its full set is a
   assert.deepEqual((await groupedInternalTransfers(h.owner,all)).map(r=>r.amount),[42]);
  }finally{h.restore();}
 });
+
+test('an internal table check writes the inspected accounting snapshot for May only on a verified Not edit',async()=>{
+ const h=harness();try{
+  const {j,r}=readyInternal();j.state='COMPLETE';h.internal.push(r);h.jobs.push(j);
+  Object.assign(r.fields,{Approve:false,'สถานะ':'สร้างแล้ว','บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'บัญชี','เวลาบัญชีตรวจผ่าน':1000,'วันที่–เวลาส่งให้นอต':2000,'ผู้ตรวจสอบก่อนอนุมัติ':'','เวลานอตตรวจผ่าน':null,'ข้อมูลที่นอตตรวจผ่าน':''});
+  const {fingerprint,checkedStage}=await import('../src/finance.js');
+  r.fields['ข้อมูลที่บัญชีตรวจผ่าน']=await fingerprint(r,j);
+  const body={header:{token:'verify',app_id:CFG.LARK_APP_ID,event_type:'drive.file.bitable_record_changed_v1',event_id:'e1'},event:{file_type:'bitable',file_token:CFG.BASE_TOKEN,table_id:SUMMARY,update_time:3,operator_id:{open_id:'ou_may'},action_list:[{action:'record_edited',record_id:r.record_id,after_value:[{field_id:'not',field_value:'true'}]}]}};
+  await externalTableReview(h.owner,body);assert.equal(r.fields['เวลานอตตรวจผ่าน'],null);
+  body.event.operator_id.open_id='ou_not';await externalTableReview(h.owner,body);
+  assert.equal(await checkedStage(r,j),'may');assert.equal(r.fields.Approve,false);
+  await externalTableReview(h.owner,body);assert.equal(h.writes.length,1);
+ }finally{h.restore();}
+});

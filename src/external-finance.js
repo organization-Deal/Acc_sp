@@ -205,27 +205,44 @@ export async function externalTick(owner,{unified=false}={}){
  if(owner.env.FINANCE_ENABLED!=='true')return {disabled:true};
  const all=await externalSnapshot(owner.env),recipients=await people(owner.env);
  let enabledAt=await owner.ctx.storage.get('external:documents-enabled-at');if(!enabledAt){enabledAt=Date.now();await owner.ctx.storage.put('external:documents-enabled-at',enabledAt);}
- let documentBudget=4;
+ // Process accounting commands before routine PDF refreshes. Rotate pending commands
+ // so one unreadable attachment cannot monopolize the document budget.
+ const commands=all.filter(x=>x.r.fields[EF.request]===true);
+ const cursor=await owner.ctx.storage.get('external:document-command-cursor');
+ const start=(commands.findIndex(x=>x.id===cursor)+1)%Math.max(1,commands.length);
+ const queue=[...commands.slice(start),...commands.slice(0,start),...all.filter(x=>x.r.fields[EF.request]!==true)];
+ let documentBudget=4,lastCommand;
+ const refreshed=[];
+
  const services={fingerprint:externalFingerprint,fresh:x=>eFresh(owner.env,x),write:(x,f)=>eWrite(owner.env,x,f),url:eUrl};
- for(let i=0;i<all.length;i++){
-  let x=all[i];if(x.audit)x=all[i]=await externalUpgradeAudit(owner,x);const eligible=!!(x.r.fields[EF.status]||x.r.fields[EF.request]||x.r.fields[ED.number]||x.createdAt>=enabledAt);
+ for(let x of queue){
+  if(x.audit)x=await externalUpgradeAudit(owner,x);const eligible=!!(x.r.fields[EF.status]||x.r.fields[EF.request]||x.r.fields[ED.number]||x.createdAt>=enabledAt);
   if(eligible&&(!eClosed(x.r)||x.audit?.paid)){
    const problem=externalProblem(x);let status='';
    if(problem)status='รอข้อมูล: '+problem;
    else {try{
     const hash=await externalFingerprint(x);
-    if(!await documentCurrent(x,'request',hash)&&documentBudget>0){documentBudget--;x=all[i]=await ensureExternalDocument(owner,x,'request',services);}
+    if(!await documentCurrent(x,'request',hash)&&documentBudget>0){documentBudget--;if(x.r.fields[EF.request]===true)lastCommand=x.id;x=await ensureExternalDocument(owner,x,'request',services);}
     if(x.audit?.fingerprint===hash&&x.audit?.not?.actor&&x.audit?.may?.actor){
-     const stage=x.audit.paid?'paid':'approved';if(!await documentCurrent(x,stage,hash)&&documentBudget>0){documentBudget--;x=all[i]=await ensureExternalDocument(owner,x,stage,services);}
+     const stage=x.audit.paid?'paid':'approved';if(!await documentCurrent(x,stage,hash)&&documentBudget>0){documentBudget--;x=await ensureExternalDocument(owner,x,stage,services);}
     }
    }catch(e){status='สร้าง PDF ไม่สำเร็จ: '+String(e.message).slice(0,180);console.log('EXTERNAL_DOCUMENT_ERROR',x.id,String(e.message));}}
    if(status&&textOf(x.r.fields[ED.status])!==status)await eWrite(owner.env,x,{[ED.status]:status});
   }
-  if(x.r.fields[EF.request]===true)x=all[i]=await externalAccounting(owner,x);
+  if(x.r.fields[EF.request]===true)x=await externalAccounting(owner,x);
+  refreshed.push(x);
+  if(x.r.fields[EF.request]===true){
+   const error=textOf(x.r.fields[ED.status]);
+   const progress='รับคำสั่งบัญชีแล้ว • '+(error.startsWith('สร้าง PDF ไม่สำเร็จ')?error:'รอใบขอจ่าย PDF ฉบับล่าสุด');
+   if(textOf(x.r.fields[EF.status])!==progress)await eWrite(owner.env,x,{[EF.status]:progress});
+   continue;
+  }
   if(!x.audit)continue;const stage=await externalStage(x);
   const status=stage==='changed'?'ข้อมูลรายการเปลี่ยน • ให้บัญชีตรวจใหม่':stage==='blocked'?'ข้อมูลไม่ครบ • '+externalProblem(x):statusFor(stage,x.audit);
   if(status&&textOf(x.r.fields[EF.status])!==status)await eWrite(owner.env,x,{[EF.status]:status,...(['changed','blocked'].includes(stage)?{[EF.not]:false,[EF.may]:false}:{})});
  }
+ if(lastCommand)await owner.ctx.storage.put('external:document-command-cursor',lastCommand);
+ all.splice(0,all.length,...refreshed);
  const transfer=await eTransferSummary(owner,all,recipients.not,unified);
  let sends=transfer.sends;const counts={not:0,may:0,transfer:transfer.count};
  for(const route of ['delegate','not','may']){

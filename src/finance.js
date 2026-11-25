@@ -46,7 +46,13 @@ export async function fingerprint(r,j){
 }
 // Every transition rechecks the exact financial data reviewed at the previous step.
 export async function checkedStage(r,j){
- const stage=financeStage(r,j);
+ let stage=financeStage(r,j);
+ // A checkbox alone can precede its event or survive a missed event. Keep
+ // the genuine review card actionable until the review snapshot is written.
+ if(stage==='blocked'&&r.fields['นอตตรวจผ่าน']===true){
+  const pending={...r,fields:{...r.fields,'นอตตรวจผ่าน':false}};
+  if(financeStage(pending,j)==='not')stage='not';
+ }
  if(!['not','may'].includes(stage))return stage;
  const hash=await fingerprint(r,j);
  if(textOf(r.fields['ข้อมูลที่บัญชีตรวจผ่าน'])!==hash)return 'accounting';

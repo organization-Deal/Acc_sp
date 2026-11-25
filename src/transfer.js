@@ -284,11 +284,12 @@ function renderSlips(){
   const el=document.createElement('div');el.className='slip';
   el.innerHTML=(s.url?'<img src="'+esc(s.url)+'">':'<div></div>')+'<div><strong>'+esc(s.name)+'</strong><p>'+esc(s.error||(s.done?'แนบสำเร็จ • รายการสำเร็จแล้ว':s.draft?fmt(s.draft.ocr.amount)+' '+s.draft.ocr.currency+' · '+s.draft.ocr.recipient_name+(s.draft.ocr.recipient_acct_mask||s.draft.ocr.recipient_acct?' · '+(s.draft.ocr.recipient_acct_mask||s.draft.ocr.recipient_acct):''):'รออ่านสลิป'))+'</p></div>';
   const box=el.lastChild;
-  if(s.draft&&!s.error){const detail=document.createElement('p');detail.className='muted';detail.textContent='ธนาคารผู้รับ: '+(s.draft.ocr.recipient_bank||'อ่านไม่ได้')+' • เลขที่รายการ: '+(s.draft.ref||'กรอกเลขที่รายการจากธนาคารก่อนยืนยัน');box.append(detail);}
+  if(s.draft&&!s.error){const detail=document.createElement('p');detail.className='muted';detail.textContent='ธนาคารผู้รับ: '+(s.draft.ocr.recipient_bank||'อ่านไม่ได้')+' • เลขที่รายการ: '+(s.draft.ref||(s.manualMode?'เลือกเองได้โดยไม่ต้องกรอกเลขที่รายการ':'อ่านเลขที่รายการไม่ได้ • เลือกรายการเองได้'));box.append(detail);}
   if(s.draft&&!s.done){
-   const refInput=document.createElement('input');refInput.setAttribute('aria-label','เลขที่รายการตามสลิป');refInput.value=s.draft.ref||'';refInput.disabled=busy;box.append(refInput);
-   const accountInput=document.createElement('input');accountInput.setAttribute('aria-label','เลขบัญชีผู้รับตามสลิป');accountInput.placeholder='เลขบัญชีผู้รับตามสลิป';accountInput.value=s.draft.ocr.recipient_acct_mask||s.draft.ocr.recipient_acct||'';accountInput.disabled=busy;box.append(accountInput);
-   const refSave=document.createElement('button');refSave.textContent='บันทึกเลขที่รายการและบัญชีที่ตรวจแล้ว';refSave.disabled=busy;refSave.onclick=async()=>{const value=refInput.value;$('confirmPaid').checked=false;busy=true;renderSlips();try{const j=await api('reference',{draft:s.draft.id,ref:value,accountMask:accountInput.value});s.draft=j.draft;if(s.draft.ocrVersion===3)s.error='';}catch(e){s.error=e.message;}busy=false;renderSlips();};box.append(refSave);
+   if(s.commitError){const failure=document.createElement('p');failure.className='warn';failure.textContent='แนบไม่สำเร็จ • '+s.commitError;box.append(failure);}
+   const refInput=document.createElement('input');refInput.setAttribute('aria-label','เลขที่รายการตามสลิป');refInput.value=s.draft.ref||'';refInput.disabled=busy||s.manualMode;box.append(refInput);
+   const accountInput=document.createElement('input');accountInput.setAttribute('aria-label','เลขบัญชีผู้รับตามสลิป');accountInput.placeholder='เลขบัญชีผู้รับตามสลิป';accountInput.value=s.draft.ocr.recipient_acct_mask||s.draft.ocr.recipient_acct||'';accountInput.disabled=busy||s.manualMode;box.append(accountInput);
+   const refSave=document.createElement('button');refSave.textContent='บันทึกเลขที่รายการและบัญชีที่ตรวจแล้ว';refSave.disabled=busy||s.manualMode;refSave.onclick=async()=>{const value=refInput.value;$('confirmPaid').checked=false;busy=true;renderSlips();try{const j=await api('reference',{draft:s.draft.id,ref:value,accountMask:accountInput.value});s.draft=j.draft;if(s.draft.ocrVersion===3)s.error='';}catch(e){s.error=e.message;}busy=false;renderSlips();};box.append(refSave);
    const o=s.draft.ocr,detected=payerCompany(o),all=slipChoices(o,rows,'');
    if(!s.company&&!s.manualCompany)s.company=detected||(all.length===1?all[0].company_id:'');
    const cs=document.createElement('select');cs.setAttribute('aria-label','บริษัทผู้จ่าย');
@@ -296,13 +297,14 @@ function renderSlips(){
    cs.value=s.company||'';cs.disabled=busy||!!detected&&!s.manualMode;
    cs.onchange=()=>{$('confirmPaid').checked=false;s.company=cs.value;s.manualCompany=true;s.id='';renderSlips();};box.append(cs);
    const toggle=document.createElement('button');toggle.textContent=s.manualMode?'กลับไปจับคู่อัตโนมัติ':'เลือกรายการเอง';toggle.disabled=busy;
-   toggle.onclick=()=>{s.manualMode=!s.manualMode;s.id='';s.manual=null;s.error='';if(!s.manualMode){s.company=detected||'';s.manualCompany=false;}$('confirmPaid').checked=false;renderSlips();};box.append(toggle);
+   toggle.onclick=()=>{s.manualMode=!s.manualMode;s.commitError='';s.id='';s.manual=null;s.error='';if(!s.manualMode){s.company=detected||'';s.manualCompany=false;}$('confirmPaid').checked=false;renderSlips();};box.append(toggle);
    const choices=s.manualMode?rows.filter(r=>s.company&&r.company_id===s.company&&!r.hasSlip).sort((a,b)=>Number(b.amount===Number(o.amount))-Number(a.amount===Number(o.amount))):s.company?slipChoices(o,rows,s.company):[];
-   if(!choices.some(r=>r.id===s.id))s.id='';
+   const current=choices.find(r=>r.id===s.id);
+   if(!current||(s.manualMode&&JSON.stringify(s.manual)!==JSON.stringify(manualTarget(current)))){s.id='';s.manual=null;}
    if(!s.manualMode&&!s.id&&choices.length===1&&!choices[0].paymentInstructions&&!s.error)s.id=choices[0].id;
    const rs=document.createElement('select');rs.setAttribute('aria-label','รายการที่โอน');
    rs.innerHTML='<option value="">'+(!s.company?'เลือกบริษัทผู้จ่ายก่อน':s.manualMode?'เลือกรายการที่โอนไปแล้ว':choices.length>1?'พบหลายรายการ กรุณาเลือก':choices.length?'เลือกรายการที่โอน':'ไม่พบรายการรอโอนที่ตรงกับสลิป')+'</option>'+choices.map(r=>'<option value="'+esc(r.id)+'">'+esc(r.doc+' · '+r.name+' · '+fmt(r.amount)+' '+r.currency+(s.manualMode?' · '+r.bank+' '+r.account:''))+'</option>').join('');
-   rs.value=s.id||'';rs.disabled=busy;rs.onchange=()=>{$('confirmPaid').checked=false;s.id=rs.value;const picked=choices.find(r=>r.id===s.id);s.manual=s.manualMode&&picked?manualTarget(picked):null;renderSlips();};box.append(rs);
+   rs.value=s.id||'';rs.disabled=busy;rs.onchange=()=>{$('confirmPaid').checked=false;s.commitError='';s.id=rs.value;const picked=choices.find(r=>r.id===s.id);s.manual=s.manualMode&&picked?manualTarget(picked):null;renderSlips();};box.append(rs);
    const info=document.createElement('p');info.className=s.id?'ok':'muted';
    info.textContent=s.id?'จับคู่แล้ว • ตรวจชื่อ บริษัท ยอด และบัญชีก่อนยืนยัน':detected?'อ่านบริษัทผู้จ่ายได้จากสลิป':'ยังระบุบริษัทผู้จ่ายไม่ได้';
    if(!choices.length&&s.company){
@@ -313,7 +315,7 @@ function renderSlips(){
    }
    if(s.company&&!rows.some(r=>r.company_id===s.company))info.textContent='บริษัทนี้ยังไม่มีรายการในคิวรอโอน ตรวจสถานะอนุมัติใน Lark';
    if(choices.some(r=>r.paymentInstructions))info.textContent='จ่ายตาม PDF • เทียบรหัสควบคุมหรือเลขอ้างอิงใน Pay-In กับสลิป แล้วเลือกรายการ';
-   if(s.manualMode)info.textContent='ตรวจชื่อผู้รับ บัญชี และยอดจากภาพต้นฉบับ แล้วเลือกรายการที่โอนจริง';
+   if(s.manualMode)info.textContent=s.id?'เลือกใบเบิกแล้ว • ตรวจภาพสลิปแล้วติ๊กยืนยันด้านล่างได้เลย':'ตรวจชื่อผู้รับ บัญชี และยอดจากภาพต้นฉบับ แล้วเลือกรายการที่โอนจริง';
    box.append(info);
    if(s.error||!choices.length||!s.draft.ref){const retry=document.createElement('button');retry.textContent='อ่านสลิปนี้ใหม่';retry.disabled=busy;retry.onclick=async()=>{busy=true;renderSlips();try{const j=await api('reread',{draft:s.draft.id,force:true});s.draft=j.draft;s.url=j.preview;s.error='';}catch(e){s.error=e.message;}busy=false;renderSlips();};box.append(retry);}
   }
@@ -346,5 +348,5 @@ async function add(files,preserve=false){if(test||busy)return;$('confirmPaid').c
 $('paste').onpaste=e=>{e.preventDefault();if(test||busy)return;let files=[...e.clipboardData.files].filter(f=>/^image\\/(jpeg|png|webp)$/.test(f.type));if(!files.length){const doc=new DOMParser().parseFromString(e.clipboardData.getData('text/html')||e.clipboardData.getData('text/plain'),'text/html');for(const im of doc.querySelectorAll('img')){const m=im.getAttribute('src')?.match(/^data:(image\\/(?:jpeg|png|webp));base64,([A-Za-z0-9+/=]+)$/);if(!m||m[2].length>8*1024*1024)continue;try{files.push(new File([Uint8Array.from(atob(m[2]),c=>c.charCodeAt(0))],im.getAttribute('alt')||'pasted-slip.jpg',{type:m[1]}));}catch{}}}if(files.length)add(files,true);else $('progress').textContent='ไม่พบภาพในคลิปบอร์ด กรุณาคัดลอกภาพสลิปหรือเลือกไฟล์';};
 $('files').onchange=e=>add([...e.target.files]);$('drop').ondragover=e=>e.preventDefault();$('drop').ondrop=e=>{e.preventDefault();add([...e.dataTransfer.files]);};$('refresh').onclick=async()=>{if(!busy){await load();if(!slips.length)await resume();}};$('uploadJump').onclick=()=>$('upload').scrollIntoView({behavior:'smooth'});
 $('confirmPaid').onchange=()=>updateCommit();
-$('commit').onclick=async()=>{if(!$('confirmPaid').checked)return;const selected=slips.filter(s=>s.draft&&(s.manualMode?s.manual:s.draft.ref)&&s.id&&s.company&&!s.done&&!s.error);if(new Set(selected.map(s=>s.id)).size!==selected.length){alert('มีหลายสลิปเลือกใบสรุปเดียวกัน กรุณาตรวจใหม่');return;}$('confirmPaid').checked=false;busy=true;renderSlips();let ok=0,fail=0;for(const s of selected){try{const j=await api('commit',{pairs:[{draft:s.draft.id,id:s.id,company:s.company,manual:s.manualMode?s.manual:null}]}),r=j.results[0];if(!r.ok)throw Error(r.error);s.done=true;ok++;}catch(e){s.error=e.message;fail++;}$('result').textContent='แนบสำเร็จ '+ok+' รายการ • ไม่สำเร็จ '+fail+' รายการ';}busy=false;await load();};(async()=>{await load();await resume();})();
+$('commit').onclick=async()=>{if(!$('confirmPaid').checked)return;const selected=slips.filter(s=>s.draft&&(s.manualMode?s.manual:s.draft.ref)&&s.id&&s.company&&!s.done&&!s.error);if(new Set(selected.map(s=>s.id)).size!==selected.length){alert('มีหลายสลิปเลือกใบสรุปเดียวกัน กรุณาตรวจใหม่');return;}$('confirmPaid').checked=false;busy=true;renderSlips();let ok=0,fail=0;for(const s of selected){try{const pair={draft:s.draft.id,id:s.id,company:s.company,manual:s.manualMode?s.manual:null};const j=await api('commit',{pairs:[pair]}),r=j.results[0];if(!r.ok)throw Error(r.error);s.done=true;s.commitError='';ok++;}catch(e){s.commitError=e.message;fail++;}$('result').textContent='แนบสำเร็จ '+ok+' รายการ • ไม่สำเร็จ '+fail+' รายการ';}busy=false;await load();};(async()=>{await load();await resume();})();
 </script></html>`;}

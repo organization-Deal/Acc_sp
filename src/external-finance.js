@@ -367,6 +367,7 @@ export async function externalPortalAction(owner,b,session){
   if(!Array.isArray(b.pairs)||b.pairs.length<1||b.pairs.length>50)throw Error('เลือก 1–50 รายการ');const results=[],used=new Set();
   for(const p of b.pairs){try{
    const d=await ctx.storage.get('external:draft:'+p.draft);if(!d||d.owner!==saved.recipient||Date.now()-d.at>2*3600000)throw Error('สลิปหมดอายุ');
+   if(!d.ref)throw Error('กรอกเลขที่รายการจากธนาคารก่อนยืนยัน');
    const done=await ctx.storage.get('paidHash:'+d.hash);if(done){if(done.id===p.id){results.push({id:p.id,ok:true,already:true});continue;}throw Error('สลิปนี้ใช้กับรายการอื่นแล้ว');}
    if(used.has(p.id))throw Error('เลือกรายการซ้ำ');used.add(p.id);const prior=await ctx.storage.get(d.refKey);if(prior&&prior.id!==p.id)throw Error('เลขอ้างอิงใช้แล้ว');
    const [kind,rid]=String(p.id).split(':');if(!EXTERNAL_TABLES[kind]||!/^rec[a-zA-Z0-9]+$/.test(rid))throw Error('รายการไม่ถูกต้อง');

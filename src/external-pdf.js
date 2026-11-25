@@ -46,7 +46,7 @@ export async function renderExternalPdf(m){
  section('03  หลักฐานประกอบ');
  text(m.evidence.length?m.evidence.map((v,i)=>(i+1)+'. '+v).join('\n'):'เอกสารประกอบอ้างอิงตามลิงก์รายการต้นทาง',{size:9,gap:14});
  if(m.peak)link('เปิดเอกสาร PEAK เดิม',m.peak);link('เปิดรายการต้นทางและหลักฐานแนบทั้งหมด',m.sourceUrl);
- if(m.stage==='paid'){section('04  หลักฐานการโอน');text('แนบและตรวจหลักฐานเมื่อ '+date(m.paid.at),{size:9,gap:16});text('เลขอ้างอิงธนาคาร: '+m.paid.ref,{size:9,gap:16});text('ผู้บันทึก: '+m.paid.name,{size:9,gap:16});text('สลิปการโอนผูกอยู่ในรายการต้นทาง',{size:9,gap:16});}
+ if(m.stage==='paid'){section('04  หลักฐานการโอน');text('แนบและตรวจหลักฐานเมื่อ '+date(m.paid.at),{size:9,gap:16});text(m.paid.ref?'เลขอ้างอิงธนาคาร: '+m.paid.ref:'ผู้บันทึกเลือกใบเบิกและยืนยันสลิปด้วยตนเอง',{size:9,gap:16});text('ผู้บันทึก: '+m.paid.name,{size:9,gap:16});text('สลิปการโอนผูกอยู่ในรายการต้นทาง',{size:9,gap:16});}
  // Formal signing area. The request copy remains unsigned; only verified approval copies carry images.
  room(185);const top=y-10,half=(width-22)/2,centres=[left+half/2,left+half+22+half/2];
  const centre=(s,c,at,size=9,color=navy)=>line(s,c-measure(s,size)/2,at,size,color);

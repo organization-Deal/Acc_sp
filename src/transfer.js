@@ -1,6 +1,8 @@
 import {snapshot,people,financeStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath} from './finance.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable,downloadMediaByToken} from './lark.js';
+import {CFG} from './config.js';
+import {historicalUrgentVoucher} from './urgent-packet.js';
 import {expenseSummary} from './expense-summary.js';
 const digits=v=>String(v||'').replace(/\D/g,'');
 // Keep visible digits in their original positions: K BIZ also hides the final digit.
@@ -103,6 +105,62 @@ export async function portalAuth(owner,k){
 async function queue(owner,test){return (await snapshot(owner.env)).filter(x=>financeStage(x.r,x.j)===(test?'test':'transfer'));}
 function view(x){const f=x.r.fields;return {id:x.r.record_id,doc:textOf(f['เลขใบขอเบิก']),company:x.j.company.name,company_id:x.j.company.id,name:x.j.employee.accountName,bank:x.j.employee.bankName,account:x.j.employee.accountNo,amount:Number(f['ยอดรวม']),currency:x.j.currency,bills:x.j.items.length,summary:expenseSummary(x.j.items,textOf(f['สรุปค่าใช้จ่าย'])),pdf:x.j.approvedPdf,hasSlip:!!f['หลักฐานการโอน']?.length};}
 export async function internalTransferRows(owner){return (await queue(owner,false)).map(x=>({...view(x),kind:'internal',source:x}));}
+// All unpaid vouchers in the same urgent run must clear review before it becomes payable.
+export async function groupedInternalTransfers(owner,all){
+ all=all||await snapshot(owner.env);
+ const ready=[],groups=new Map();
+ const dateOf=j=>j?.docNo?.match(/^[^-]+-(\d{8})-/)?.[1];
+ const payableDates=new Set(all.filter(x=>financeStage(x.r,x.j)==='transfer').map(x=>dateOf(x.j)).filter(Boolean));
+ const candidates=all.filter(({j})=>payableDates.has(dateOf(j))&&j?.items?.length===1);
+ const urgentJobs=new Set(),unknown=[];
+ for(const {j} of candidates){
+  if(await historicalUrgentVoucher(j.docNo)||await owner.ctx.storage.get('urgent-member:'+j.key))urgentJobs.add(j.key);
+  else if(j.items[0].record_id)unknown.push(j);
+ }
+ for(let i=0;i<unknown.length;i+=100){
+  const jobs=unknown.slice(i,i+100);
+  const result=await api(owner.env,recordsPath(CFG.T_EXPENSE)+'/batch_get','POST',{record_ids:[...new Set(jobs.map(j=>j.items[0].record_id))]});
+  const ids=new Set((result.records||[]).filter(r=>r.fields['สรุปรอบเบิกด่วน']===true).map(r=>r.record_id));
+  for(const j of jobs)if(ids.has(j.items[0].record_id)){urgentJobs.add(j.key);await owner.ctx.storage.put('urgent-member:'+j.key,true);}
+ }
+ for(const x of all){
+  const {r,j}=x,stage=financeStage(r,j);
+  if(!j||['closed','legacy','test','returned'].includes(stage))continue;
+  const date=dateOf(j),urgent=urgentJobs.has(j.key);
+  if(!urgent){if(stage==='transfer')ready.push({...view(x),kind:'internal',source:x});continue;}
+  const e=j.employee||{};
+  const key=JSON.stringify([j.company?.id,e.recordId||e.name,e.accountName,e.bankName,e.accountNo,j.currency,date]);
+  if(!groups.has(key))groups.set(key,[]);
+  groups.get(key).push({x,stage});
+ }
+ for(const entries of groups.values()){
+  if(entries.some(e=>e.stage!=='transfer'))continue;
+  const members=entries.map(e=>e.x).sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));
+  const first=members[0],row={...view(first),source:first,kind:'internal'};
+  if(members.length>1){
+   const identities=await Promise.all(members.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),x.j.approvedPdf]));
+   row.id='urgent-'+await digest(identities);row.members=members;
+   row.amount=members.reduce((sum,x)=>sum+Math.round(Number(x.r.fields['ยอดรวม'])*100),0)/100;
+   row.bills=members.reduce((sum,x)=>sum+x.j.items.length,0);
+   row.doc='เบิกด่วนรวม '+members.length+' ใบ';
+   row.summary=expenseSummary(members.flatMap(x=>x.j.items),'');
+   row.hasSlip=members.some(x=>x.r.fields['หลักฐานการโอน']?.length);
+  }
+  ready.push(row);
+ }
+ return ready;
+}
+async function commitUrgent(owner,row,draft){
+ const records=row.members.map(({r})=>{
+  const evidence=r.fields['หลักฐานการโอน']||[];
+  if(evidence.some(a=>a.file_token!==draft.file))throw Error('พบสลิปอื่นในชุดเบิก กรุณาตรวจหลักฐาน');
+  return {record_id:r.record_id,fields:{'หลักฐานการโอน':[{file_token:draft.file}],'เวลาที่แมต':Date.now(),'รายการสำเร็จ':true}};
+ });
+ const reservation={id:row.id,at:Date.now(),file:draft.file,records:records.map(r=>r.record_id)};
+ await owner.ctx.storage.put(draft.refKey,reservation);
+ await api(owner.env,recordsPath(SUMMARY)+'/batch_update','POST',{records});
+ await owner.ctx.storage.put('paidHash:'+draft.hash,reservation);
+}
 export async function portalAction(owner,b,session){
  const {ctx,env}=owner, saved=session||await portalAuth(owner,b.token),test=saved.stage==='test';
  if(b.op==='rows')return {ok:true,test,rows:(await queue(owner,test)).map(view)};
@@ -149,7 +207,16 @@ export async function portalAction(owner,b,session){
    if(done){if(done.id===p.id){results.push({id:p.id,ok:true,already:true});continue;}throw Error('สลิปถูกใช้กับรายการอื่นแล้ว');}
    if(used.has(p.id))throw Error('เลือกใบสรุปซ้ำในชุดนี้');used.add(p.id);
    const prior=await ctx.storage.get(d.refKey);if(prior&&prior.id!==p.id)throw Error('เลขอ้างอิงสลิปถูกใช้แล้ว');
-   const x=(await queue(owner,false)).find(x=>x.r.record_id===p.id);if(!x)throw Error('รายการไม่อยู่ในคิวรอโอนหรือเป็น TEST');
+   if(prior?.records&&prior.file===d.file){
+    const all=await snapshot(env),written=new Set(all.filter(x=>x.r.fields['รายการสำเร็จ']===true&&x.r.fields['หลักฐานการโอน']?.some(a=>a.file_token===d.file)).map(x=>x.r.record_id));
+    if(prior.records.every(id=>written.has(id))){await ctx.storage.put('paidHash:'+d.hash,prior);results.push({id:p.id,ok:true,already:true});continue;}
+   }
+   const payable=(await groupedInternalTransfers(owner)).find(row=>row.id===p.id);
+   if(payable?.members){
+    if(payable.company_id!==p.company||!slipFits(d.ocr,payable))throw Error('สลิปไม่ตรงกับยอดรวม บริษัท หรือผู้รับ');
+    await commitUrgent(owner,payable,d);results.push({id:p.id,ok:true});continue;
+   }
+   const x=payable?.source;if(!x)throw Error('รายการไม่อยู่ในคิวรอโอนหรือเป็น TEST');
    if(x.j.company.id!==p.company)throw Error('บริษัทไม่ตรง');
    if(!slipFits(d.ocr,view(x)))throw Error('ยอด สกุลเงิน หรือบัญชีผู้รับไม่ตรง');
    const fp=await fingerprint(x.r,x.j);

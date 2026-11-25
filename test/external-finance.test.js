@@ -135,14 +135,16 @@ test('returned rows wait for accounting; raw result checkboxes do not create app
  const h=harness();try{const r=record('dealpay');r.fields[EF.not]=true;r.fields[EF.may]=true;h.rows.dealpay.push(r);assert.equal(await externalStage(externalRow('dealpay',r)),'accounting');r.fields[EF.request]=true;await externalTick(h.owner);const saved=h.db.get(h.db.get('external:active:not')[0]);await externalCallback(h.owner,h.callback(saved,'return','dealpay:'+r.record_id));await externalTick(h.owner);assert.equal(await externalStage(externalRow('dealpay',r)),'returned');assert.equal(h.db.get('external:active:may').length,0);
  }finally{h.restore();}
 });
-test('transfer requires approved unchanged row, matching company/amount/account and unique slip; paid status is only set after attachment',async()=>{
+for(const manual of [false,true])test('external settlement keeps reviewed target and is idempotent (manual='+manual+')',async()=>{
  const h=harness();try{const r=record('dealpay');r.fields[EF.request]=true;h.rows.dealpay.push(r);await externalTick(h.owner);await externalCallback(h.owner,h.callback(h.db.get(h.db.get('external:active:not')[0])));await externalTick(h.owner);await externalCallback(h.owner,h.callback(h.db.get(h.db.get('external:active:may')[0])));await externalTick(h.owner);const saved=h.db.get(h.db.get('external:active:transfer')[0]),id='dealpay:'+r.record_id;
   const draft={id:'draft',owner:'ou_not',at:Date.now(),hash:'hash',refKey:'paidRef:ref',ref:'ref',file:'uploaded-file',ocr:{amount:20,currency:'THB',recipient_acct:'2100'}};h.db.set('external:draft:draft',draft);
-  const run=company=>externalPortalAction(h.owner,{token:saved.nonce,op:'commit',pairs:[{draft:'draft',id,company}]});
+  const row=(await externalPortalAction(h.owner,{token:saved.nonce,op:'rows'})).rows[0];
+  if(manual){draft.ref='';draft.ocr.recipient_acct='xxxx';}
+  const run=company=>externalPortalAction(h.owner,{token:saved.nonce,op:'commit',pairs:[{draft:'draft',id,company,manual:manual?[row.company_id,row.name,row.bank,row.account,Math.round(row.amount*100),row.currency]:null}]});
   assert.equal((await run('PSH')).results[0].ok,false);assert.notEqual(r.fields['รายการสำเร็จ'],true);
   assert.equal((await run('ODP')).results[0].ok,true);assert.equal(r.fields['รายการสำเร็จ'],true);assert.equal(r.fields['หลักฐานการโอน'][0].file_token,'uploaded-file');
   const writes=h.writes.filter(w=>w.id===r.record_id);const attach=writes.findIndex(w=>'หลักฐานการโอน' in w.fields),paid=writes.findIndex(w=>w.fields['รายการสำเร็จ']===true);assert.ok(attach>=0&&paid>attach);
-  assert.equal((await run('ODP')).results[0].already,true);await poll(h.owner);assert.ok(r.fields[ED.paid]?.length);assert.equal(documentMeta(externalRow('dealpay',r)).paid.fingerprint,await externalFingerprint(externalRow('dealpay',r)));const paidJob=[...h.db.values()].find(x=>x?.model?.stage==='paid');assert.equal(paidJob.model.paid.ref,'ref');assert.equal(paidJob.model.may.name,'May');
+  assert.equal((await run('ODP')).results[0].already,true);await poll(h.owner);assert.ok(r.fields[ED.paid]?.length);assert.equal(documentMeta(externalRow('dealpay',r)).paid.fingerprint,await externalFingerprint(externalRow('dealpay',r)));const paidJob=[...h.db.values()].find(x=>x?.model?.stage==='paid');assert.equal(paidJob.model.paid.ref,manual?'':'ref');assert.equal(paidJob.model.may.name,'May');
  }finally{h.restore();}
 });
 test('slip identity does not fall back to same amount, and external page uses its own authenticated API',()=>{const x=externalRow('dealpay',record('dealpay'));assert.equal(externalSlipFits({amount:20,currency:'THB',recipient_acct:'9999'},x),false);assert.equal(externalSlipFits({amount:20,currency:'THB',recipient_acct:'2100'},x),true);assert.match(externalTransferPage('abc'),/external-transfer-api/);});

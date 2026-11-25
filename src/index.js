@@ -136,7 +136,9 @@ async function handlePost(request, env, ctx) {
   let body;
   try { body = await request.json(); } catch (e) { return json({ ok: true }); }
   if(body.header?.event_type==='drive.file.bitable_record_changed_v1'){
-    if(isPartnerReviewEvent(env,body))await doStub(env,'finance-coordinator-v1').tableReview(body);
+    const relevant=isPartnerReviewEvent(env,body);
+    console.log('TABLE_EDIT_RECEIVED',JSON.stringify({relevant,table:body.event?.table_id,actions:body.event?.action_list?.length}));
+    if(relevant)await doStub(env,'finance-coordinator-v1').tableReview(body);
     return json({ok:true});
   }
   if (body.event?.action?.value?.externalFinance === true) {

@@ -5,7 +5,7 @@ import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
-import {transferPage,portalAuth,portalAction,groupedInternalTransfers,novemberRunStatus,slipFits,confirmsTarget} from './transfer.js';
+import {transferPage,portalAuth,portalAction,groupedInternalTransfers,slipFits,confirmsTarget} from './transfer.js';
 import {expenseSummary} from './expense-summary.js';
 import {internalTransferDocument} from './internal-transfer-document.js';
 
@@ -397,7 +397,6 @@ export async function unifiedPortalAuth(owner,token){
 export async function unifiedPortalAction(owner,b){
  const saved=await unifiedPortalAuth(owner,b.token);
  if(saved.stage==='test')return portalAction(owner,b,saved);
- if(b.op==='november-run-status')return {ok:true,rows:await novemberRunStatus(owner)};
  if(['resume','reread','reference','discard'].includes(b.op))return portalAction(owner,b,saved);
  if(b.op==='rows'){
   const [internal,external]=await Promise.all([groupedInternalTransfers(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);

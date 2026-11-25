@@ -92,6 +92,7 @@ export async function matchOCR(env, base64, mime){
   const mt=/png|jpe?g|webp|gif/i.test(mime||'') ? String(mime).toLowerCase().replace('image/jpg','image/jpeg') : 'image/jpeg';
   const prompt=`อ่านสลิปโอนเงินธนาคารไทย ตอบ JSON เท่านั้น:
 {"ref":"Transaction ID / เลขที่รายการ / เลขอ้างอิง หรือ null","amount":เลข|null,"currency":"THB|USD","recipient_name":"ชื่อผู้รับ|null","recipient_acct":"เลขบัญชีผู้รับตามภาพ เก็บ x และขีดทุกตำแหน่ง|null","recipient_acct_mask":"เลขบัญชีผู้รับตามภาพ ห้ามลบหรือเติมตัวเลข/x|null","recipient_bank":"ชื่อธนาคารผู้รับ|null","sender_name":"ชื่อผู้โอนฝั่ง From ทั้งไทยและอังกฤษ|null","sender_acct":"เลขบัญชีผู้โอนตามภาพ|null"}
+รองรับทั้งสลิปสำเร็จและภาพหน้ารายละเอียดรายการ ภาษาไทยหรืออังกฤษ อ่านฝั่ง จาก/From และ ไปยัง/To แยกกัน ถ้าเป็นบุคคลหรือบริษัทให้คงชื่อที่ปรากฏ หากไม่มีช่องเลขที่รายการให้ใช้ null
 เริ่มอ่าน ref จากบรรทัด เลขที่รายการ / Transaction ID ใต้หัวข้อ Transfer Completed ด้านบนของสลิป K BIZ คัดลอกรหัสทั้งหมดทั้งตัวอักษรและตัวเลขตามภาพ (มักขึ้นต้น TRTS หรือ TRBS) รหัสนี้คือเลขอ้างอิงธุรกรรมที่ต้องการ ห้ามใช้เลขบัญชีหรือวันที่แทน ห้ามเดาหรือเพิ่มลดตัวเลข ถ้าอ่านไม่ได้จริงให้ null
 ห้ามเดาตัวเลขที่ซ่อน สลิป K BIZ เช่น xxx-x-x9079-x ให้คงเป็น xxx-x-x9079-x ไม่ใช่ 9079 เพราะตัวสุดท้ายก็ถูกซ่อน ชื่อธนาคารผู้รับอ่านจากฝั่ง To ไม่ใช่โลโก้หัวกระดาษหรือฝั่ง From ชื่อบริษัทผู้โอนอ่านจากฝั่ง From เท่านั้น ถ้าอ่านไม่ได้ให้ null ยอดใช้จำนวนเงินโอน ไม่รวมค่าธรรมเนียม`;
   const read=async instruction=>{
@@ -108,9 +109,18 @@ export async function matchOCR(env, base64, mime){
   return JSON.parse(m[0]);
   };
   const o=await read(prompt);
-  if(!o.ref||/^(null|none)$/i.test(String(o.ref))){
-    const reference=await read('อ่านเฉพาะรหัสธุรกรรมจากภาพนี้: บรรทัด "เลขที่รายการ / Transaction ID" ใต้ "Transfer Completed" ด้านบนของสลิป K BIZ หรือเลขอ้างอิงธุรกรรมของธนาคารอื่น คัดลอกตัวอักษรและตัวเลขทุกตัวตรงตามภาพ ห้ามใช้เลขบัญชี วันที่ หรือเดาตัวเลข ตอบ JSON เท่านั้น {"ref":"รหัสที่อ่านได้ หรือ null ถ้าอ่านไม่ได้"}');
-    o.ref=reference.ref||null;
+  const mask=String(o.recipient_acct_mask||o.recipient_acct||'');
+  const kbiz=/^(TRBS|TRTS|BILS)/i.test(o.ref||'');
+  const masked=/[x*•●×]/i.test(mask);
+  if(!o.ref||/^(null|none)$/i.test(o.ref)||kbiz||masked&&mask.replace(/\D/g,'').length<4){
+    const detail=await read('อ่านภาพต้นฉบับซ้ำเฉพาะสองตำแหน่ง แยกบรรทัด Transaction ID ด้านบน และเลขบัญชีฝั่ง ไปยัง / To ตรงเหนือชื่อผู้รับ อ่านทีละกลุ่ม เก็บเลขศูนย์นำหน้า ตัว x และขีดทุกตำแหน่ง ห้ามใช้ข้อมูลฝั่ง จาก / From ห้ามสร้างเลขที่รายการจากวันเวลา หากขาดให้ใส่ null ตอบ JSON {"ref":null,"recipient_acct_mask":null}');
+    const second=String(detail.ref||'').trim();
+    // Disagreeing references need transcription from the original before posting.
+    o.ref=second&&!/^(none|null)$/i.test(second)&&(!kbiz||second===o.ref)?second:null;
+    if(detail.recipient_acct_mask&&/^[0-9xX*•●×\s-]+$/.test(detail.recipient_acct_mask)){
+      o.recipient_acct_mask=detail.recipient_acct_mask;
+      o.recipient_acct=detail.recipient_acct_mask;
+    }
   }
   o.amount=parseAmount(o.amount); return o;
 }

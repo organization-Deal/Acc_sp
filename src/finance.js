@@ -144,6 +144,30 @@ export const TABLE_REQUEST='ส่งให้นอต (คำสั่งจ�
 export const DELIVERY_STATUS='สถานะส่งให้นอต', DELIVERY_AT='วันที่–เวลาส่งให้นอต', DELIVERY_ID='รหัสข้อความส่งให้นอต';
 // This receipt is written only after Lark has returned a message_id.
 export async function recordNotDelivery(owner,key,saved,all){
+ if(saved.stage==='may'&&saved.sent&&saved.message&&saved.sentAt&&!owner.env.FINANCE_TEST_ONLY?.match(/^true$/)){
+  const label='หลักฐานส่งให้เมย์';
+  const stamp='ส่งแล้ว • '+new Date(saved.sentAt).toLocaleString('th-TH',{timeZone:'Asia/Bangkok'})+' • '+saved.message;
+  const records=[];
+  for(const [id,hash,,,accountingAt,notAt] of saved.signatures){
+   const x=all.find(x=>x.r.record_id===id),f=x?.r.fields;
+   if(!x?.j||!f||f[label]===stamp||await checkedStage(x.r,x.j)!=='may'||await fingerprint(x.r,x.j)!==hash||
+     f['เวลาบัญชีตรวจผ่าน']!==accountingAt||f['เวลานอตตรวจผ่าน']!==notAt)continue;
+   records.push({record_id:id,fields:{[label]:stamp}});
+  }
+  if(records.length){
+   const path=recordsPath(SUMMARY).replace(/\/records$/,'/fields');
+   try{
+    if(!await owner.ctx.storage.get('may-delivery-field')){
+     const schema=await api(owner.env,path+'?page_size=100');
+     if(!schema.items?.some(f=>f.field_name===label))await api(owner.env,path,'POST',{field_name:label,type:1});
+     await owner.ctx.storage.put('may-delivery-field',true);
+    }
+    await api(owner.env,recordsPath(SUMMARY)+'/batch_update','POST',{records});
+    for(const rec of records)Object.assign(all.find(x=>x.r.record_id===rec.record_id).r.fields,rec.fields);
+   }catch(e){console.log('MAY_DELIVERY_RECEIPT_RETRY',e.message);}
+  }
+  return;
+ }
  if(saved.stage!=='not'||!saved.sent||!saved.message)return;
  const {env,ctx}=owner;
  const targets=[];

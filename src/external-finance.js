@@ -5,7 +5,7 @@ import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
-import {transferPage,portalAuth,portalAction,internalTransferRows,slipFits} from './transfer.js';
+import {transferPage,portalAuth,portalAction,groupedInternalTransfers,slipFits} from './transfer.js';
 import {expenseSummary} from './expense-summary.js';
 import {internalTransferDocument} from './internal-transfer-document.js';
 
@@ -142,7 +142,7 @@ async function eTransferSummary(owner,all,recipient,unified=false){
  const store=owner.ctx.storage,rows=[];
  for(const x of all)if(await externalStage(x)==='transfer')rows.push(x);
  const externalCount=rows.length;
- if(unified)for(const x of await internalTransferRows(owner))rows.push({...x,company:x.source.j.company,r:x.source.r,table:'tblgakFKBOvz9aCW'});
+ if(unified)for(const x of await groupedInternalTransfers(owner))rows.push({...x,company:x.source.j.company,r:x.source.r,table:'tblgakFKBOvz9aCW'});
  rows.sort((a,b)=>a.company.id.localeCompare(b.company.id)||a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
  const pointer=await store.get('external:transfer-summary'),keys=[...new Set([pointer,...await store.get('external:active:transfer')||[]].filter(Boolean))],existing=[];
  for(const key of keys){const saved=await store.get(key);if(saved)existing.push({key,saved});}
@@ -381,8 +381,8 @@ export async function unifiedPortalAction(owner,b){
  if(saved.stage==='test')return portalAction(owner,b,saved);
  if(['resume','reread','reference','discard'].includes(b.op))return portalAction(owner,b,saved);
  if(b.op==='rows'){
-  const [internal,external]=await Promise.all([internalTransferRows(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);
-  const rows=[...internal.map(({source,...x})=>({...x,doc:'เบิกภายใน • '+x.doc,originalPdf:x.pdf,pdf:eDocumentUrl({id:'internal:'+x.id},saved.nonce,'approved',owner.env)})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];
+  const [internal,external]=await Promise.all([groupedInternalTransfers(owner),externalPortalAction(owner,{...b,op:'rows'},saved)]);
+  const rows=[...internal.map(({source,members,...x})=>({...x,doc:'เบิกภายใน • '+x.doc,originalPdf:members?undefined:x.pdf,pdf:eDocumentUrl({id:'internal:'+x.id},saved.nonce,'approved',owner.env)})),...external.rows.map(x=>({...x,kind:x.id.split(':')[0]}))];
   rows.sort((a,b)=>a.company_id.localeCompare(b.company_id)||a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
   return {ok:true,test:false,rows};
  }

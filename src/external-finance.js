@@ -203,6 +203,11 @@ async function eReceipt(owner,saved,all){
 }
 export async function externalTick(owner,{unified=false}={}){
  if(owner.env.FINANCE_ENABLED!=='true')return {disabled:true};
+ const subscriptionKey='external:table-events:'+CFG.BASE_TOKEN;
+ if(!await owner.ctx.storage.get(subscriptionKey)){
+  try{await api(owner.env,'drive/v1/files/'+CFG.BASE_TOKEN+'/subscribe?file_type=bitable','POST');await owner.ctx.storage.put(subscriptionKey,true);}
+  catch(e){console.log('PARTNER_TABLE_EVENT_SUBSCRIPTION_ERROR',String(e.message));}
+ }
  const all=await externalSnapshot(owner.env),recipients=await people(owner.env);
  let enabledAt=await owner.ctx.storage.get('external:documents-enabled-at');if(!enabledAt){enabledAt=Date.now();await owner.ctx.storage.put('external:documents-enabled-at',enabledAt);}
  // Process accounting commands before routine PDF refreshes. Rotate pending commands
@@ -279,21 +284,24 @@ export function isPartnerReviewEvent(env,body){
 export async function externalTableReview(owner,body){
  if(!isPartnerReviewEvent(owner.env,body))return;
  const e=body.event,actor=e.operator_id?.open_id,at=Number(e.update_time)*1000;
- if(!actor||!Number.isSafeInteger(at)||at<=0||actor!==(await people(owner.env)).not)return;
+ if(!actor||!Number.isSafeInteger(at)||at<=0)return;
+ const recipients=await people(owner.env),role=actor===recipients.not?'not':actor===recipients.may?'may':null;
+ if(!role)return;
  const table=e.table_id;
  const fields=await api(owner.env,recordsPath(table).replace(/\/records$/,'/fields')+'?page_size=100');
- const field=fields.items.find(f=>f.field_name===EF.not&&f.type===7)?.field_id;
+ const field=fields.items.find(f=>f.field_name===EF[role]&&f.type===7)?.field_id;
  if(!field)return;
  for(const action of e.action_list||[]){
   if(action.action!=='record_edited'||!/^rec[a-zA-Z0-9]+$/.test(action.record_id))continue;
   const before=action.before_value?.find(v=>v.field_id===field),after=action.after_value?.find(v=>v.field_id===field);
   if(after?.field_value!=='true'||before?.field_value==='true')continue;
   const x=await eFresh(owner.env,{kind:'partner',table,r:{record_id:action.record_id}});
-  if(x.r.fields[EF.not]!==true||await externalStage(x)!=='not')continue;
+  if(x.r.fields[EF[role]]!==true||await externalStage(x)!==role)continue;
   // Never apply a delayed event to a new accounting submission or an unseen request.
-  const sent=x.audit.delivery?.not?.at;
+  const sent=x.audit.delivery?.[role]?.at;
   if(!sent||at<sent||at<x.audit.accounting.at)continue;
-  await eStateWrite(owner.env,x,{...x.audit,stage:'may',not:{actor,at,source:'lark_table',eventId:body.header.event_id}});
+  if(role==='may'&&(x.audit.not?.actor!==recipients.not||at<x.audit.not.at))continue;
+  await eStateWrite(owner.env,x,{...x.audit,stage:role==='not'?'may':'transfer',[role]:{actor,at,source:'lark_table',eventId:body.header.event_id}});
  }
 }
 export async function externalCallback(owner,b){

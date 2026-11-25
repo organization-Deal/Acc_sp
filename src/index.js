@@ -1,4 +1,4 @@
-import {externalTick,externalCallback,unifiedDocumentAccess,unifiedPortalAuth,unifiedPortalAction,externalTransferPage,EXTERNAL_FLOW_VERSION} from './external-finance.js';
+import {isPartnerReviewEvent,externalTableReview,externalTick,externalCallback,unifiedDocumentAccess,unifiedPortalAuth,unifiedPortalAction,externalTransferPage,EXTERNAL_FLOW_VERSION} from './external-finance.js';
 import {transferPage} from './transfer.js';
 import {financeTick,financeCallback,verifiedCallback} from './finance.js';
 import {validateBills} from './validation.js';
@@ -135,6 +135,10 @@ async function handlePost(request, env, ctx) {
 
   let body;
   try { body = await request.json(); } catch (e) { return json({ ok: true }); }
+  if(body.header?.event_type==='drive.file.bitable_record_changed_v1'){
+    if(isPartnerReviewEvent(env,body))await doStub(env,'finance-coordinator-v1').tableReview(body);
+    return json({ok:true});
+  }
   if (body.event?.action?.value?.externalFinance === true) {
     if (env.FINANCE_ENABLED !== 'true' || !verifiedCallback(env,body)) return new Response('Unauthorized',{status:403});
     ctx.waitUntil(doStub(env,'finance-coordinator-v1').externalDecide(body));
@@ -239,6 +243,10 @@ export class SessionDO extends DurableObject {
   }
   async financeDecide(body) {
     const run=(this.financeSerial||Promise.resolve()).then(()=>financeCallback(this,body));
+    this.financeSerial=run.catch(()=>{});return run;
+  }
+  async tableReview(body){
+    const run=(this.financeSerial||Promise.resolve()).then(()=>externalTableReview(this,body));
     this.financeSerial=run.catch(()=>{});return run;
   }
   async externalDecide(body){const run=(this.financeSerial||Promise.resolve()).then(async()=>{const r=await externalCallback(this,body);await externalTick(this,{unified:true});return r;});this.financeSerial=run.catch(()=>{});return run;}

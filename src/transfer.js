@@ -48,6 +48,18 @@ export function slipFits(o,r){
   &&(!payer||!cid||payer===cid)&&(!o.recipient_bank||(!!fromBank&&!!toBank&&fromBank===toBank)));
 }
 export function slipChoices(o,rows,company){return rows.filter(r=>!r.hasSlip&&(!company||r.company_id===company)&&slipFits(o,r));}
+export function reviewSuggestions(o,rows,company){
+ if(!company||!o.currency||!(Number(o.amount)>0))return [];
+ const raw=String(o.recipient_acct_mask||o.recipient_acct||'');
+ const mask=raw.toLowerCase().replace(/[\s-]/g,'').replace(/[*•●×]/g,'x');
+ return rows.filter(r=>!r.hasSlip&&r.company_id===company&&r.currency===String(o.currency).toUpperCase()&&
+  Math.round(r.amount*100)===Math.round(Number(o.amount)*100)).map(r=>{
+  const account=String(r.account||'').replace(/\D/g,'');
+  const projected=account.length===mask.length&&/^[x0-9]+$/.test(mask)
+   ?[...mask].map((c,i)=>c==='x'?'x':account[i]).join(''):account;
+  return r.doc+' · '+r.name+' · '+(r.bank||'')+' · บัญชีในคิว '+(projected||'จ่ายตามเอกสาร');
+ });
+}
 async function saveDraft(owner,d){for(const key of ['draft:'+d.id,'external:draft:'+d.id,'draftHash:'+d.hash])await owner.ctx.storage.put(key,d);}
 export async function resumeDrafts(owner,saved){
  const all=new Map();for(const prefix of ['draft:','external:draft:'])for(const [,d] of await owner.ctx.storage.list({prefix})){
@@ -258,6 +270,7 @@ ${payerCompany.toString()}
 ${sameBiller.toString()}
 ${slipFits.toString()}
 ${slipChoices.toString()}
+${reviewSuggestions.toString()}
 function renderSlips(){
  const root=$('slips');root.innerHTML='';
  for(const s of slips){
@@ -283,7 +296,12 @@ function renderSlips(){
    rs.value=s.id||'';rs.disabled=busy;rs.onchange=()=>{$('confirmPaid').checked=false;s.id=rs.value;renderSlips();};box.append(rs);
    const info=document.createElement('p');info.className=s.id?'ok':'muted';
    info.textContent=s.id?'จับคู่แล้ว • ตรวจชื่อ บริษัท ยอด และบัญชีก่อนยืนยัน':detected?'อ่านบริษัทผู้จ่ายได้จากสลิป':'ยังระบุบริษัทผู้จ่ายไม่ได้';
-   if(!choices.length&&s.company){const near=rows.filter(r=>!r.hasSlip&&r.company_id===s.company&&Math.round(r.amount*100)===Math.round(Number(o.amount)*100)&&accountFits(o.recipient_acct_mask||o.recipient_acct,r.account));if(near.length)info.textContent='บัญชีและยอดตรง แต่ธนาคารไม่ตรง: สลิป '+o.recipient_bank+' / รายการ '+near.map(r=>r.bank).join(', ')+' — กรุณาตรวจข้อมูล';}
+   if(!choices.length&&s.company){
+    const near=reviewSuggestions(o,rows,s.company);
+    info.style.whiteSpace='pre-line';
+    info.textContent=near.length?['พบรายการบริษัทและยอดตรงกัน '+near.length+' รายการ',...near,'สลิปอ่านได้ '+(o.recipient_acct_mask||o.recipient_acct||'ไม่เห็นเลขบัญชี')+' · '+(o.recipient_bank||'ไม่เห็นชื่อธนาคาร'),'เทียบกับภาพสลิปต้นฉบับ หากระบบอ่านผิด ให้แก้ช่องบัญชีผู้รับด้านบนแล้วกดบันทึก'].join('\\n'):'ยังไม่มีรายการรอโอนสกุลเงินและยอดนี้ในคิวของบริษัทที่เลือก';
+    if(near.length&&s.url){const preview=document.createElement('a');preview.href=s.url;preview.target='_blank';preview.rel='noopener';preview.textContent='ดูภาพสลิปขนาดเต็ม';preview.onclick=e=>{e.preventDefault();const dialog=document.createElement('dialog'),img=document.createElement('img'),close=document.createElement('button');img.src=s.url;img.style.cssText='width:100%;height:auto;max-width:none';close.textContent='ปิดภาพ';close.onclick=()=>dialog.close();dialog.append(close,img);dialog.onclose=()=>dialog.remove();document.body.append(dialog);dialog.showModal();};box.append(preview);}
+   }
    if(s.company&&!rows.some(r=>r.company_id===s.company))info.textContent='บริษัทนี้ยังไม่มีรายการในคิวรอโอน ตรวจสถานะอนุมัติใน Lark';
    if(choices.some(r=>r.paymentInstructions))info.textContent='จ่ายตาม PDF • เทียบรหัสควบคุมหรือเลขอ้างอิงใน Pay-In กับสลิป แล้วเลือกรายการ';
    box.append(info);

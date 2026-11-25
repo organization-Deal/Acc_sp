@@ -1,5 +1,5 @@
 import {PDFDocument} from 'pdf-lib';
-import {internalTransferRows} from './transfer.js';
+import {groupedInternalTransfers} from './transfer.js';
 import {api,recordsPath,fingerprint} from './finance.js';
 import {CFG} from './config.js';
 import {appendPdfAttachments,downloadBitableAttachment} from './attachment-pdf.js';
@@ -17,23 +17,28 @@ async function approvedPdfBytes(value){
 
 // Called only after the existing transfer-session authorization has succeeded.
 export async function internalTransferDocument(owner,id){
- const row=(await internalTransferRows(owner)).find(x=>x.id===id);if(!row)throw Error('รายการไม่อยู่ในคิวรอโอน');
- const {r,j}=row.source,hash=await fingerprint(r,j),files=[],seen=new Set();
- for(const item of j.items){
-  const attachments=item.attachments||[];if(!attachments.length)continue;
-  if(!/^rec[a-zA-Z0-9]+$/.test(item.record_id))throw Error('ไม่พบรายการต้นทางของไฟล์แนบ');
-  const current=(await api(owner.env,recordsPath(CFG.T_EXPENSE)+'/'+item.record_id)).record;
-  for(const a of attachments){
-   if(!a.file_token)throw Error('ไฟล์แนบไม่มีรหัสถาวร กรุณาตรวจต้นทาง');
-   if(seen.has(a.file_token))continue;seen.add(a.file_token);
-   const field=Object.keys(current.fields).find(k=>Array.isArray(current.fields[k])&&current.fields[k].some(v=>v.file_token===a.file_token));
-   if(!field)throw Error('ไฟล์แนบต้นทางเปลี่ยน กรุณาตรวจรายการ');
-   files.push(await downloadBitableAttachment(owner,{table:CFG.T_EXPENSE,record:item.record_id,field,token:a.file_token,name:a.name||a.file_token}));
+ const row=(await groupedInternalTransfers(owner)).find(x=>x.id===id);if(!row)throw Error('รายการไม่อยู่ในคิวรอโอน');
+ let out;
+ for(const {j} of row.members||[row.source]){
+  const files=[],seen=new Set();
+  for(const item of j.items){
+   const attachments=item.attachments||[];if(!attachments.length)continue;
+   if(!/^rec[a-zA-Z0-9]+$/.test(item.record_id))throw Error('ไม่พบรายการต้นทางของไฟล์แนบ');
+   const current=(await api(owner.env,recordsPath(CFG.T_EXPENSE)+'/'+item.record_id)).record;
+   for(const a of attachments){
+    if(!a.file_token)throw Error('ไฟล์แนบไม่มีรหัสถาวร กรุณาตรวจต้นทาง');
+    if(seen.has(a.file_token))continue;seen.add(a.file_token);
+    const field=Object.keys(current.fields).find(k=>Array.isArray(current.fields[k])&&current.fields[k].some(v=>v.file_token===a.file_token));
+    if(!field)throw Error('ไฟล์แนบต้นทางเปลี่ยน กรุณาตรวจรายการ');
+    files.push(await downloadBitableAttachment(owner,{table:CFG.T_EXPENSE,record:item.record_id,field,token:a.file_token,name:a.name||a.file_token}));
+   }
   }
+  const doc=await PDFDocument.load(await approvedPdfBytes(j.approvedPdf));
+  if(!out)out=doc;
+  else for(const page of await out.copyPages(doc,doc.getPageIndices()))out.addPage(page);
+  await appendPdfAttachments(out,files);
  }
- const doc=await PDFDocument.load(await approvedPdfBytes(j.approvedPdf));
- await appendPdfAttachments(doc,files);
- const fresh=(await internalTransferRows(owner)).find(x=>x.id===id);
- if(!fresh||fresh.pdf!==j.approvedPdf||await fingerprint(fresh.source.r,fresh.source.j)!==hash)throw Error('ข้อมูลเปลี่ยนระหว่างรวมเอกสาร');
- return {bytes:await doc.save(),filename:j.docNo+'-with-evidence.pdf'};
+ const fresh=(await groupedInternalTransfers(owner)).find(x=>x.id===id);
+ if(!fresh||fresh.pdf!==row.pdf||await fingerprint(fresh.source.r,fresh.source.j)!==await fingerprint(row.source.r,row.source.j))throw Error('ข้อมูลเปลี่ยนระหว่างรวมเอกสาร');
+ return {bytes:await out.save(),filename:(row.members?row.id:row.source.j.docNo)+'-with-evidence.pdf'};
 }

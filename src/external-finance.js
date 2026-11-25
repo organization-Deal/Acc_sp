@@ -1,6 +1,6 @@
 import {ED,documentReady,documentCurrent,ensureExternalDocument,readExternalDocument} from './external-documents.js';
 // Partner payments and per-customer refunds. This module never transfers money or creates PEAK documents.
-import {api,recordsPath,people,textOf,digest,verifiedCallback,fingerprint} from './finance.js';
+import {api,recordsPath,people,textOf,digest,verifiedCallback,fingerprint,SUMMARY,snapshot,checkedStage,DELIVERY_AT} from './finance.js';
 import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
@@ -279,7 +279,7 @@ export function isPartnerReviewEvent(env,body){
  return env.FINANCE_ENABLED==='true'&&!!env.LARK_VERIFICATION_TOKEN&&
   h?.token===env.LARK_VERIFICATION_TOKEN&&h.app_id===CFG.LARK_APP_ID&&
   h.event_type==='drive.file.bitable_record_changed_v1'&&!!h.event_id&&
-  e?.file_type==='bitable'&&e.file_token===CFG.BASE_TOKEN&&e.table_id===EXTERNAL_TABLES.partner.table;
+  e?.file_type==='bitable'&&e.file_token===CFG.BASE_TOKEN&&[EXTERNAL_TABLES.partner.table,SUMMARY].includes(e.table_id);
 }
 export async function externalTableReview(owner,body){
  if(!isPartnerReviewEvent(owner.env,body))return;
@@ -288,13 +288,30 @@ export async function externalTableReview(owner,body){
  const recipients=await people(owner.env),role=actor===recipients.not?'not':actor===recipients.may?'may':null;
  if(!role)return;
  const table=e.table_id;
+ if(table===SUMMARY&&role!=='not')return;
  const fields=await api(owner.env,recordsPath(table).replace(/\/records$/,'/fields')+'?page_size=100');
  const field=fields.items.find(f=>f.field_name===EF[role]&&f.type===7)?.field_id;
  if(!field)return;
+ let internal;
  for(const action of e.action_list||[]){
   if(action.action!=='record_edited'||!/^rec[a-zA-Z0-9]+$/.test(action.record_id))continue;
   const before=action.before_value?.find(v=>v.field_id===field),after=action.after_value?.find(v=>v.field_id===field);
   if(after?.field_value!=='true'||before?.field_value==='true')continue;
+  if(table===SUMMARY){
+   internal??=await snapshot(owner.env);
+   const x=internal.find(item=>item.r.record_id===action.record_id);
+   if(!x?.j)continue;
+   const r=(await api(owner.env,recordsPath(SUMMARY)+'/'+action.record_id)).record;
+   const f=r.fields,hash=await fingerprint(r,x.j);
+   const pending={...r,fields:{...f,[EF.not]:false}};
+   if(f[EF.not]!==true||await checkedStage(pending,x.j)!=='not'||
+      !f[DELIVERY_AT]||at<Number(f[DELIVERY_AT])||at<Number(f['เวลาบัญชีตรวจผ่าน'])||
+      at<Number(f['เวลาขอส่งให้นอตซ้ำ']||0))continue;
+   if(f['ข้อมูลที่นอตตรวจผ่าน']===hash&&f['เวลานอตตรวจผ่าน']&&f['ผู้ตรวจสอบก่อนอนุมัติ'])continue;
+   await api(owner.env,recordsPath(SUMMARY)+'/'+action.record_id,'PUT',{fields:{
+    'ผู้ตรวจสอบก่อนอนุมัติ':'นอต (NOT)','เวลานอตตรวจผ่าน':at,'ข้อมูลที่นอตตรวจผ่าน':hash}});
+   continue;
+  }
   const x=await eFresh(owner.env,{kind:'partner',table,r:{record_id:action.record_id}});
   if(x.r.fields[EF[role]]!==true||await externalStage(x)!==role)continue;
   // Never apply a delayed event to a new accounting submission or an unseen request.

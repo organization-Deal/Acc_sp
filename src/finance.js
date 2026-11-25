@@ -1,3 +1,4 @@
+import {syncUrgentPacket} from './urgent-packet.js';
 // Unified accounting cards. No bank transfer or PEAK payment is performed here.
 import {CFG} from './config.js';
 import {larkToken} from './lark.js';
@@ -84,7 +85,7 @@ const plain=content=>({tag:'plain_text',content});
 const paragraph=content=>({tag:'div',text:{tag:'lark_md',content}});
 const button=(label,value,url)=>({tag:'button',text:plain(label),...(url?{url}:{value}),type:'default'});
 const card=(title,elements,template='blue')=>({config:{wide_screen_mode:true,update_multi:true,enable_forward:false},header:{template,title:plain(title)},elements});
-function rowText(x){const f=x.r.fields;return '**'+md(f['เลขใบขอเบิก'])+' • '+md(x.j.company.name)+'**\n'+md(f['ชื่อพนักงาน'])+' • '+x.j.items.length+' บิล • **'+money(f['ยอดรวม'])+' '+md(x.j.currency)+'**\n[ดู PDF]('+linkOf(f['ใบขอเบิก PDF'])+') | [เปิดรายการ]('+SUMMARY_URL+'&record='+x.r.record_id+')';}
+function rowText(x){const f=x.r.fields;return '**'+md(f['เลขใบขอเบิก'])+' • '+md(x.j.company.name)+'**\n'+md(f['ชื่อพนักงาน'])+' • '+x.j.items.length+' บิล • **'+money(f['ยอดรวม'])+' '+md(x.j.currency)+'**\n[ดู PDF]('+linkOf(f['ใบขอเบิก PDF'])+') | ['+(f['ชุดตรวจเบิกด่วน PDF']?.length?'เปิดชุดตรวจเบิกด่วน PDF':'เปิดรายการ')+']('+SUMMARY_URL+'&record='+x.r.record_id+')';}
 function reviewCard(stage,rows,nonce){
  const pending=rows.filter(x=>!x.reviewStatus);
  const elements=[paragraph('ตรวจเอกสารก่อนกด • ปุ่มใช้ได้เฉพาะ'+(stage==='accounting'?'ฝ่ายบัญชี':stage==='not'?'นอต':'เมย์')+'\n'+rows.length+' ใบสรุป แยกบริษัท • ไม่ใช่การยืนยันโอนเงิน')];
@@ -237,6 +238,9 @@ export async function financeTick(owner,{unifiedTransfers=false}={}){
    await ctx.storage.put('active:'+stage,active);}
  }
  await ctx.storage.put('lastPoll',{at:Date.now(),counts:Object.fromEntries(Object.entries(groups).map(([k,v])=>[k,v.length])),sends});
+ if(env.FINANCE_TEST_ONLY!=='true'){
+  try{await syncUrgentPacket(owner,all);}catch(e){console.log('URGENT_PACKET_RETRY',String(e.message));}
+ }
  console.log('FINANCE_POLL',JSON.stringify({counts:Object.fromEntries(Object.entries(groups).map(([k,v])=>[k,v.length])),sends}));
  return {ok:true,sends};
 }

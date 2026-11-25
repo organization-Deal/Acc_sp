@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {EF,EXTERNAL_TABLES,externalRow,externalFingerprint,externalProblem,externalStage,externalTick as poll,externalCallback,externalPortalAction,externalSlipFits,externalTransferPage} from '../src/external-finance.js';
+import {externalTableReview,EF,EXTERNAL_TABLES,externalRow,externalFingerprint,externalProblem,externalStage,externalTick as poll,externalCallback,externalPortalAction,externalSlipFits,externalTransferPage} from '../src/external-finance.js';
 import {ED,documentMeta,documentReady,documentSignature} from '../src/external-documents.js';
 import {PDFDocument} from 'pdf-lib';
 import {digest,SUMMARY,LEDGER} from '../src/finance.js';
@@ -24,7 +24,7 @@ function harness(){
   const path=new URL(url).pathname,body=typeof opt.body==='string'?JSON.parse(opt.body):{};let data={};
   if(path.endsWith('/medias/upload_all')){if(failUpload){failUpload=false;return new Response(JSON.stringify({code:999,msg:'failed'}),{status:503});}assert.equal(opt.body.get('parent_type'),'bitable_file');assert.equal(opt.body.get('file').type,'application/pdf');const file='pdf_'+(files.size+1);files.set(file,await opt.body.get('file').arrayBuffer());data.file_token=file;}
   else if(path.endsWith('/download')){if(failDownload){failDownload=false;return new Response('failed',{status:503});}const extra=JSON.parse(new URL(url).searchParams.get('extra'));assert.ok(extra.bitablePerm.tableId);assert.ok(Object.keys(extra.bitablePerm.attachments).length);const token=path.split('/').at(-2);return new Response(files.has(token)?files.get(token):Buffer.from(pixel,'base64'));}
-  else if(path.endsWith('/fields'))data.items=[...Object.values(ED),...new Set(Object.values(EXTERNAL_TABLES).flatMap(t=>t.attachments)),'หลักฐานการโอน'].map((name,i)=>({field_name:name,field_id:'fld'+i,type:17}));
+  else if(path.endsWith('/fields'))data.items=[...Object.values(ED),...new Set(Object.values(EXTERNAL_TABLES).flatMap(t=>t.attachments)),'หลักฐานการโอน'].map((name,i)=>({field_name:name,field_id:'fld'+i,type:17})).concat(['not','may'].map(role=>({field_name:EF[role],field_id:role,type:7})));
   else if(path.includes('/im/v1/messages')){if(opt.method==='POST'){sendAttempts.push(body.uuid);data.message_id=sentUuids.get(body.uuid);if(!data.message_id){data.message_id='om_'+(++serial);sentUuids.set(body.uuid,data.message_id);cards.set(data.message_id,{to:body.receive_id,card:JSON.parse(body.content)});}if(loseSendResponse){loseSendResponse=false;throw Error('lost response after acceptance');}}else cards.get(path.split('/').pop()).card=JSON.parse(body.content);}
   else if(path.includes(CFG.T_EMPLOYEE))data.items=[{fields:{'Name (TH)':'นายธีร์ชนาภัทร รุ่งโรจน์สุทธิธนา','Lark open_id':'ou_not'}},{fields:{'Name (TH)':'นางสาวภัทร์ปรียา อภิรติวงศ์โชติ','Lark open_id':'ou_may'}}];
   else if(path.includes(LEDGER))data.items=jobs.map(j=>({fields:{'ข้อมูลงาน JSON':JSON.stringify(j)}}));
@@ -116,6 +116,18 @@ test('changed data blocks May, requires accounting again, and retires old approv
  const h=harness();try{const r=record('partner');r.fields[EF.request]=true;h.rows.partner.push(r);await externalTick(h.owner);let saved=h.db.get(h.db.get('external:active:not')[0]);await externalCallback(h.owner,h.callback(saved));await externalTick(h.owner);saved=h.db.get(h.db.get('external:active:may')[0]);
   r.fields['ยอดโอนเงิน']=999;assert.equal(await externalStage(externalRow('partner',r)),'changed');assert.equal((await externalCallback(h.owner,h.callback(saved))).ok,false);assert.notEqual(r.fields[EF.may],true);
   r.fields[EF.request]=true;await externalTick(h.owner);assert.equal(await externalStage(externalRow('partner',r)),'not');assert.deepEqual(await externalCallback(h.owner,h.callback(saved)),{ignored:true});
+ }finally{h.restore();}
+});
+test('a table resubmission takes priority over PDF refreshes and reports why it is waiting',async()=>{
+ const h=harness();try{
+  const r=record('partner',7);r.fields[EF.request]=true;h.rows.partner.push(r);
+  await poll(h.owner);
+  for(let i=0;i<4;i++){const other=record('partner',i);other.fields[EF.status]='รอบัญชีเช็ก';h.rows.partner.unshift(other);}
+  r.fields['ยอดโอนเงิน']=510;r.fields[EF.request]=true;h.failUpload();
+  await poll(h.owner);assert.match(r.fields[EF.status],/รับคำสั่งบัญชีแล้ว.*สร้าง PDF ไม่สำเร็จ/);
+  assert.equal(r.fields[EF.request],true);
+  await poll(h.owner);assert.equal(r.fields[EF.request],false);assert.equal(await externalStage(externalRow('partner',r)),'not');
+  assert.match(r.fields[EF.delivery],/ส่งแล้ว/);
  }finally{h.restore();}
 });
 test('returned rows wait for accounting; raw result checkboxes do not create approval',async()=>{
@@ -270,4 +282,23 @@ test('partner Pay-In PDF supports QR text or an empty account without inventing 
   assert.equal(externalSlipFits({amount:x.amount,currency:'THB',recipient_acct:'123456'},x),false);
  }
  r.fields['เอกสารแนบ']=[];assert.match(externalProblem(externalRow('partner',r)),/เลขบัญชี/);
+});
+
+test('table review requires an authenticated field edit by the assigned reviewer for the current stage',async()=>{
+ const h=harness();try{
+  const r=record('partner');h.rows.partner.push(r);r.fields[EF.request]=true;await poll(h.owner);
+  const submit=(actor,field,at,token='verify')=>externalTableReview(h.owner,{
+   header:{token,event_id:'event-'+field,app_id:CFG.LARK_APP_ID,event_type:'drive.file.bitable_record_changed_v1'},
+   event:{file_type:'bitable',file_token:CFG.BASE_TOKEN,table_id:EXTERNAL_TABLES.partner.table,
+    operator_id:{open_id:actor},update_time:at,
+    action_list:[{action:'record_edited',record_id:r.record_id,before_value:[{field_id:field,field_value:'false'}],after_value:[{field_id:field,field_value:'true'}]}]}
+  });
+  let at=Math.ceil(Date.now()/1000);r.fields[EF.not]=true;
+  await submit('ou_not','not',at,'wrong');await submit('ou_may','not',at);await submit('ou_not','not',at-60);
+  assert.equal(externalRow('partner',r).audit.stage,'not');
+  await submit('ou_not','not',at);await submit('ou_not','not',at);await poll(h.owner);
+  assert.equal(externalRow('partner',r).audit.stage,'may');
+  r.fields[EF.may]=true;at=Math.ceil(Date.now()/1000);await submit('ou_may','may',at);await poll(h.owner);
+  assert.equal(await externalStage(externalRow('partner',r)),'transfer');
+ }finally{h.restore();}
 });

@@ -69,7 +69,7 @@ export function reviewSuggestions(o,rows,company){
 async function saveDraft(owner,d){for(const key of ['draft:'+d.id,'external:draft:'+d.id,'draftHash:'+d.hash])await owner.ctx.storage.put(key,d);}
 export async function resumeDrafts(owner,saved){
  const all=new Map();for(const prefix of ['draft:','external:draft:'])for(const [,d] of await owner.ctx.storage.list({prefix})){
-  if(d.owner!==saved.recipient||Date.now()-d.at>2*3600000||await owner.ctx.storage.get('paidHash:'+d.hash))continue;
+  if(d.tableAttachment||d.owner!==saved.recipient||Date.now()-d.at>2*3600000||await owner.ctx.storage.get('paidHash:'+d.hash))continue;
   if(!all.has(d.refKey))all.set(d.refKey,d);
  }
  return [...all.values()].sort((a,b)=>a.at-b.at).slice(-50);
@@ -214,9 +214,13 @@ export async function reconcileAttachedSlip(owner,rows,recipient){
  const storage=owner.ctx.storage,cursor=await storage.get('attached-slip:cursor');
  const row=eligible[(eligible.findIndex(row=>row.id===cursor)+1)%eligible.length];
  await storage.put('attached-slip:cursor',row.id);
+ return settleAttachedSlip(owner,row,recipient);
+}
+export async function settleAttachedSlip(owner,row,recipient,selectedToken){
+ const storage=owner.ctx.storage;
  const evidence=(row.members||[row.source]).flatMap(x=>x.r.fields['หลักฐานการโอน']||[]);
  const file=evidence[0]?.file_token;
- if(!file||evidence.some(a=>a.file_token!==file))return;
+ if(!file||evidence.some(a=>a.file_token!==file)||(selectedToken&&selectedToken!==file))return;
  const key='attached-slip:ocr:'+file;
  let draft=await storage.get(key);
  if(!draft){
@@ -227,12 +231,16 @@ export async function reconcileAttachedSlip(owner,rows,recipient){
   let bin='';
   for(let i=0;i<bytes.length;i+=32768)bin+=String.fromCharCode(...bytes.subarray(i,i+32768));
   const image=btoa(bin),ocr=await matchOCR(owner.env,image,mime),ref=String(ocr.ref||'').replace(/\s/g,'');
-  draft={id:crypto.randomUUID(),file,hash:await digest(image),ocr,ref,refKey:'paidRef:'+await digest(ref)};
+  const hash=await digest(image);
+  draft={id:crypto.randomUUID(),tableAttachment:true,file,hash,ocr,ref,refKey:ref?'paidRef:'+await digest(ref):'unconfirmed:'+hash};
   await storage.put(key,draft);
  }
- if(!draft.ref||payerCompany(draft.ocr)!==row.company_id||!slipFits(draft.ocr,row))return;
+ const automatic=draft.ref&&payerCompany(draft.ocr)===row.company_id&&slipFits(draft.ocr,row);
+ if(!automatic&&!selectedToken)return;
+ // A single table row cannot assert a manual match for an entire grouped payment.
+ if(!automatic&&row.members)return;
  await storage.put('draft:'+draft.id,{...draft,owner:recipient,at:Date.now()});
- const result=await portalAction(owner,{op:'commit',pairs:[{draft:draft.id,id:row.id,company:row.company_id,attached:true}]},{stage:'transfer',recipient});
+ const result=await portalAction(owner,{op:'commit',pairs:[{draft:draft.id,id:row.id,company:row.company_id,attached:true,manual:automatic?undefined:manualTarget(row)}]},{stage:'transfer',recipient});
  return result.results[0]?.ok;
 }
 async function commitUrgent(owner,row,draft,manual){

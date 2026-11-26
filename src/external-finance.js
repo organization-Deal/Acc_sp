@@ -5,11 +5,11 @@ import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
-import {transferPage,portalAuth,portalAction,groupedInternalTransfers,reconcileAttachedSlip,slipFits,confirmsTarget} from './transfer.js';
+import {transferPage,portalAuth,portalAction,groupedInternalTransfers,reconcileAttachedSlip,settleAttachedSlip,slipFits,confirmsTarget} from './transfer.js';
 import {expenseSummary} from './expense-summary.js';
 import {internalTransferDocument} from './internal-transfer-document.js';
 
-export const EXTERNAL_FLOW_VERSION='finance-v5-internal-table-review';
+export const EXTERNAL_FLOW_VERSION='finance-v6-approved-queue-table-slips';
 export const EF={request:'บัญชีเช็กแล้ว → ส่งให้นอต',status:'สถานะงาน',not:'นอตตรวจผ่าน',may:'เมย์อนุมัติ',delivery:'หลักฐานส่งให้นอต',audit:'ข้อมูล Flow (ระบบ)'};
 export const EXTERNAL_TABLES={
  partner:{table:'tbldczVhrFWfJ5ze',label:'คู่ค้า',doc:'รายการเบิก',company:'ชื่อบริษัท',name:'ชื่อบริษัทคู่ค้าผู้รับเงิน',amount:'ยอดโอนเงิน',account:'เลขบัญชีผู้รับเงิน',detail:'ชื่อรายการ',attachments:['เอกสารแนบ']},
@@ -296,10 +296,27 @@ export async function externalTableReview(owner,body){
  if(table===SUMMARY&&role!=='not')return;
  const fields=await api(owner.env,recordsPath(table).replace(/\/records$/,'/fields')+'?page_size=100');
  const field=fields.items.find(f=>f.field_name===EF[role]&&f.type===7)?.field_id;
- if(!field)return;
+ const slipField=table===SUMMARY&&fields.items.find(f=>f.field_name==='หลักฐานการโอน'&&f.type===17)?.field_id;
+ if(!field&&!slipField)return;
  let internal;
  for(const action of e.action_list||[]){
   if(action.action!=='record_edited'||!/^rec[a-zA-Z0-9]+$/.test(action.record_id))continue;
+  if(slipField){
+   const changed=action.after_value?.find(v=>v.field_id===slipField);
+   if(changed){
+    const tokens=value=>{
+     try{const parsed=typeof value==='string'?JSON.parse(value):value;
+      return Array.isArray(parsed)?parsed.map(a=>a.file_token||a.token).filter(Boolean):[];
+     }catch{return [];}
+    };
+    const next=tokens(changed.field_value),previous=tokens(action.before_value?.find(v=>v.field_id===slipField)?.field_value);
+    if(next.length===1&&!previous.includes(next[0])){
+     const row=(await groupedInternalTransfers(owner)).find(r=>r.id===action.record_id);
+     if(row&&row.hasSlip&&at>=Number(row.source.r.fields['เวลานอตตรวจผ่าน']||0))
+      await settleAttachedSlip(owner,row,actor,next[0]);
+    }
+   }
+  }
   const before=action.before_value?.find(v=>v.field_id===field),after=action.after_value?.find(v=>v.field_id===field);
   if(after?.field_value!=='true'||before?.field_value==='true')continue;
   if(table===SUMMARY){

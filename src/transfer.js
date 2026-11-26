@@ -1,4 +1,5 @@
 import {snapshot,people,financeStage,checkedStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath,isTestVoucher} from './finance.js';
+import {downloadBitableAttachment} from './attachment-pdf.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable,downloadMediaByToken} from './lark.js';
 import {CFG} from './config.js';
@@ -224,7 +225,8 @@ export async function settleAttachedSlip(owner,row,recipient,selectedToken){
  const key='attached-slip:ocr:'+file;
  let draft=await storage.get(key);
  if(!draft){
-  const bytes=new Uint8Array(await downloadMediaByToken(owner.env,file));
+  const source=(row.members||[row.source]).find(x=>x.r.fields['หลักฐานการโอน']?.some(a=>a.file_token===file));
+  const {bytes}=await downloadBitableAttachment(owner,{table:SUMMARY,record:source.r.record_id,field:'หลักฐานการโอน',token:file});
   if(!bytes.length||bytes.length>6*1024*1024)return;
   const mime=bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':String.fromCharCode(...bytes.slice(8,12))==='WEBP'?'image/webp':null;
   if(!mime)return;

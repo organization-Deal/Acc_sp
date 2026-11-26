@@ -193,3 +193,30 @@ test('an approved voucher can enter the queue before signing only with a matchin
  decision.actor='wrong';
  assert.deepEqual(await groupedInternalTransfers(owner,[{r,j}]),[]);
 });
+
+test('a table-selected slip settles through the portal once and rejects a stale attachment',async()=>{
+ const {settleAttachedSlip,groupedInternalTransfers}=await import('../src/transfer.js');
+ const {LEDGER}=await import('../src/finance.js');
+ const {r,j}=fixture();
+ Object.assign(j,{state:'APPROVED',approvedPdf:'signed'});
+ Object.assign(r.fields,{'สถานะ':'อนุมัติแล้ว',Approve:true,'PDF อนุมัติแล้ว':{link:'signed'},'นอตตรวจผ่าน':true,'ผู้ตรวจสอบก่อนอนุมัติ':'N','เวลานอตตรวจผ่าน':2,'หลักฐานการโอน':[{file_token:'slip'}]});
+ const draft={tableAttachment:true,id:'d',file:'slip',ref:'',ocr:{},hash:'H',refKey:'unconfirmed:H'};
+ const db=new Map([['attached-slip:ocr:slip',draft]]);
+ const owner={env:{KV:{get:async()=>'token'}},ctx:{storage:{get:k=>db.get(k),put:(k,v)=>db.set(k,v)}}};
+ const row=(await groupedInternalTransfers(owner,[{r,j}]))[0];
+ const original=globalThis.fetch;let writes=0;
+ globalThis.fetch=async(url,opt)=>{
+  if(opt.method==='PUT'){Object.assign(r.fields,JSON.parse(opt.body).fields);writes++;}
+  const data=url.includes(LEDGER)?{items:[{fields:{'ข้อมูลงาน JSON':JSON.stringify(j)}}]}:url.endsWith('/r')?{record:r}:{items:[r]};
+  return Response.json({code:0,data});
+ };
+ try{
+  assert.equal(await settleAttachedSlip(owner,row,'not','other'),undefined);
+  assert.equal(await settleAttachedSlip(owner,row,'not'),undefined);
+  assert.equal(writes,0);
+  assert.equal(await settleAttachedSlip(owner,row,'not','slip'),true);
+  assert.equal(r.fields['รายการสำเร็จ'],true);assert.ok(r.fields['เวลาที่แมต']);
+  assert.equal(await settleAttachedSlip(owner,row,'not','slip'),true);
+  assert.equal(writes,2);
+ }finally{globalThis.fetch=original;}
+});

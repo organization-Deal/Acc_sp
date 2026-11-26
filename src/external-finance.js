@@ -5,7 +5,7 @@ import {CFG} from './config.js';
 import {companyFromName} from './companies.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable} from './lark.js';
-import {transferPage,portalAuth,portalAction,groupedInternalTransfers,slipFits,confirmsTarget} from './transfer.js';
+import {transferPage,portalAuth,portalAction,groupedInternalTransfers,reconcileAttachedSlip,slipFits,confirmsTarget} from './transfer.js';
 import {expenseSummary} from './expense-summary.js';
 import {internalTransferDocument} from './internal-transfer-document.js';
 
@@ -142,7 +142,12 @@ async function eTransferSummary(owner,all,recipient,unified=false){
  const store=owner.ctx.storage,rows=[];
  for(const x of all)if(await externalStage(x)==='transfer')rows.push(x);
  const externalCount=rows.length;
- if(unified)for(const x of await groupedInternalTransfers(owner))rows.push({...x,company:x.source.j.company,r:x.source.r,table:'tblgakFKBOvz9aCW'});
+ if(unified){
+  let internal=await groupedInternalTransfers(owner);
+  try{if(await reconcileAttachedSlip(owner,internal,recipient))internal=await groupedInternalTransfers(owner);}
+  catch(e){console.log('ATTACHED_SLIP_RETRY',e.message);}
+  for(const x of internal)rows.push({...x,company:x.source.j.company,r:x.source.r,table:SUMMARY});
+ }
  rows.sort((a,b)=>a.company.id.localeCompare(b.company.id)||a.kind.localeCompare(b.kind)||a.id.localeCompare(b.id));
  const pointer=await store.get('external:transfer-summary'),keys=[...new Set([pointer,...await store.get('external:active:transfer')||[]].filter(Boolean))],existing=[];
  for(const key of keys){const saved=await store.get(key);if(saved)existing.push({key,saved});}

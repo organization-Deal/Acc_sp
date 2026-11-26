@@ -1,4 +1,4 @@
-import {snapshot,people,financeStage,checkedStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath} from './finance.js';
+import {snapshot,people,financeStage,checkedStage,fingerprint,textOf,digest,api,SUMMARY,recordsPath,isTestVoucher} from './finance.js';
 import {matchOCR} from './match.js';
 import {uploadBytesToBitable,downloadMediaByToken} from './lark.js';
 import {CFG} from './config.js';
@@ -136,7 +136,7 @@ function separateNovemberRun(j){
 }
 async function payableBeforeSigning(owner,r,j,cache={}){
  const f=r.fields;
- if(!separateNovemberRun(j)||financeStage(r,j)!=='waiting'||f.Approve!==true||j.approvedPdf)return false;
+ if(financeStage(r,j)!=='waiting'||f.Approve!==true||j.approvedPdf||isTestVoucher(f,j))return false;
  // Recheck both previous review fingerprints on the exact current voucher.
  const beforeApproval={...r,fields:{...f,Approve:false}};
  if(await checkedStage(beforeApproval,j)!=='may')return false;
@@ -156,7 +156,12 @@ export async function groupedInternalTransfers(owner,all){
  all=all||await snapshot(owner.env);
  const ready=[],groups=new Map(),reviewCache={};
  const dateOf=j=>j?.docNo?.match(/^[^-]+-(\d{8})-/)?.[1];
- const payableDates=new Set(all.filter(x=>financeStage(x.r,x.j)==='transfer').map(x=>dateOf(x.j)).filter(Boolean));
+ const pending=new Set(),payableDates=new Set();
+ for(const {r,j} of all){
+  if(await payableBeforeSigning(owner,r,j,reviewCache))pending.add(r.record_id);
+  const date=dateOf(j);
+  if(date&&(pending.has(r.record_id)||financeStage(r,j)==='transfer'))payableDates.add(date);
+ }
  const candidates=all.filter(({j})=>payableDates.has(dateOf(j))&&j?.items?.length===1);
  const urgentJobs=new Set(),unknown=[];
  for(const {j} of candidates){
@@ -170,16 +175,16 @@ export async function groupedInternalTransfers(owner,all){
   for(const j of jobs)if(ids.has(j.items[0].record_id)){urgentJobs.add(j.key);await owner.ctx.storage.put('urgent-member:'+j.key,true);}
  }
  for(const x of all){
-  const {r,j}=x,stage=financeStage(r,j);
+  const {r,j}=x,pendingSignedPdf=pending.has(r.record_id),stage=pendingSignedPdf?'transfer':financeStage(r,j);
   if(!j||['closed','legacy','test','returned'].includes(stage))continue;
   if(separateNovemberRun(j)){
-   if(stage==='transfer'||await payableBeforeSigning(owner,r,j,reviewCache)){
-    ready.push({...view(x),kind:'internal',source:x,pendingSignedPdf:stage!=='transfer'});
+   if(stage==='transfer'){
+    ready.push({...view(x),kind:'internal',source:x,pendingSignedPdf});
    }
    continue;
   }
   const date=dateOf(j),urgent=urgentJobs.has(j.key);
-  if(!urgent){if(stage==='transfer')ready.push({...view(x),kind:'internal',source:x});continue;}
+  if(!urgent){if(stage==='transfer')ready.push({...view(x),kind:'internal',source:x,pendingSignedPdf});continue;}
   const e=j.employee||{};
   const key=JSON.stringify([j.company?.id,e.recordId||e.name,e.accountName,e.bankName,e.accountNo,j.currency,date]);
   if(!groups.has(key))groups.set(key,[]);
@@ -188,7 +193,7 @@ export async function groupedInternalTransfers(owner,all){
  for(const entries of groups.values()){
   if(entries.some(e=>e.stage!=='transfer'))continue;
   const members=entries.map(e=>e.x).sort((a,b)=>a.r.record_id.localeCompare(b.r.record_id));
-  const first=members[0],row={...view(first),source:first,kind:'internal'};
+  const first=members[0],row={...view(first),source:first,kind:'internal',pendingSignedPdf:members.some(x=>pending.has(x.r.record_id))};
   if(members.length>1){
    const identities=await Promise.all(members.map(async x=>[x.r.record_id,await fingerprint(x.r,x.j),x.j.approvedPdf]));
    row.id='urgent-'+await digest(identities);row.members=members;
@@ -201,6 +206,34 @@ export async function groupedInternalTransfers(owner,all){
   ready.push(row);
  }
  return ready;
+}
+// Reconcile one directly attached slip per pass, including attachments from earlier runs.
+export async function reconcileAttachedSlip(owner,rows,recipient){
+ const eligible=rows.filter(row=>row.hasSlip);
+ if(!eligible.length)return;
+ const storage=owner.ctx.storage,cursor=await storage.get('attached-slip:cursor');
+ const row=eligible[(eligible.findIndex(row=>row.id===cursor)+1)%eligible.length];
+ await storage.put('attached-slip:cursor',row.id);
+ const evidence=(row.members||[row.source]).flatMap(x=>x.r.fields['หลักฐานการโอน']||[]);
+ const file=evidence[0]?.file_token;
+ if(!file||evidence.some(a=>a.file_token!==file))return;
+ const key='attached-slip:ocr:'+file;
+ let draft=await storage.get(key);
+ if(!draft){
+  const bytes=new Uint8Array(await downloadMediaByToken(owner.env,file));
+  if(!bytes.length||bytes.length>6*1024*1024)return;
+  const mime=bytes[0]===137?'image/png':bytes[0]===255?'image/jpeg':String.fromCharCode(...bytes.slice(8,12))==='WEBP'?'image/webp':null;
+  if(!mime)return;
+  let bin='';
+  for(let i=0;i<bytes.length;i+=32768)bin+=String.fromCharCode(...bytes.subarray(i,i+32768));
+  const image=btoa(bin),ocr=await matchOCR(owner.env,image,mime),ref=String(ocr.ref||'').replace(/\s/g,'');
+  draft={id:crypto.randomUUID(),file,hash:await digest(image),ocr,ref,refKey:'paidRef:'+await digest(ref)};
+  await storage.put(key,draft);
+ }
+ if(!draft.ref||payerCompany(draft.ocr)!==row.company_id||!slipFits(draft.ocr,row))return;
+ await storage.put('draft:'+draft.id,{...draft,owner:recipient,at:Date.now()});
+ const result=await portalAction(owner,{op:'commit',pairs:[{draft:draft.id,id:row.id,company:row.company_id,attached:true}]},{stage:'transfer',recipient});
+ return result.results[0]?.ok;
 }
 async function commitUrgent(owner,row,draft,manual){
  const records=row.members.map(({r})=>{
@@ -266,6 +299,7 @@ export async function portalAction(owner,b,session){
    }
    const payable=(await groupedInternalTransfers(owner)).find(row=>row.id===p.id);
    if(payable?.members){
+    if(p.attached&&!payable.members.some(x=>x.r.fields['หลักฐานการโอน']?.some(a=>a.file_token===d.file)))throw Error('หลักฐานเปลี่ยนแล้ว');
     if(payable.company_id!==p.company||!(p.manual?confirmsTarget(p,payable):slipFits(d.ocr,payable)))throw Error('สลิปไม่ตรงกับยอดรวม บริษัท หรือผู้รับ');
     await commitUrgent(owner,payable,d,p.manual?{by:saved.recipient,target:p.manual}:null);results.push({id:p.id,ok:true});continue;
    }
@@ -276,7 +310,7 @@ export async function portalAction(owner,b,session){
    x.r=(await api(env,recordsPath(SUMMARY)+'/'+p.id)).record;
    if((financeStage(x.r,x.j)!=='transfer'&&!await payableBeforeSigning(owner,x.r,x.j))||await fingerprint(x.r,x.j)!==fp)throw Error('ข้อมูลเปลี่ยน กรุณาโหลดใหม่');
    const old=x.r.fields['หลักฐานการโอน']||[];
-   if(old.length&&!old.some(f=>f.file_token===d.file))throw Error('มีหลักฐานอยู่แล้ว ต้องตรวจใน Lark ก่อนเพื่อไม่แนบทับ');
+   if((p.attached&&(!old.length||old.length!==1))||old.some(f=>f.file_token!==d.file))throw Error('มีหลักฐานอยู่แล้ว ต้องตรวจใน Lark ก่อนเพื่อไม่แนบทับ');
    const reserve={manual:p.manual?{by:saved.recipient,target:p.manual}:null,id:p.id,at:Date.now(),file:d.file};await ctx.storage.put(d.refKey,reserve);
    // Attach before setting paid. Retry can recover after either write without replacing another slip.
    await api(env,recordsPath(SUMMARY)+'/'+p.id,'PUT',{fields:{'หลักฐานการโอน':[{file_token:d.file}],'เวลาที่แมต':Date.now()}});

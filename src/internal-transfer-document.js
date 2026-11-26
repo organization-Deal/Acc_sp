@@ -33,7 +33,7 @@ export async function internalTransferDocument(owner,id){
     files.push(await downloadBitableAttachment(owner,{table:CFG.T_EXPENSE,record:item.record_id,field,token:a.file_token,name:a.name||a.file_token}));
    }
   }
-  const doc=await PDFDocument.load(await approvedPdfBytes(row.pendingSignedPdf?j.pdfUrl:j.approvedPdf));
+  const doc=await PDFDocument.load(await approvedPdfBytes(j.approvedPdf||(row.pendingSignedPdf&&j.pdfUrl)));
   if(!out)out=doc;
   else for(const page of await out.copyPages(doc,doc.getPageIndices()))out.addPage(page);
   await appendPdfAttachments(out,files);

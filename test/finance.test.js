@@ -180,3 +180,16 @@ test('retry revalidates changed financial data and never approves altered rows',
   assert.equal(writes.length,4);
  }finally{globalThis.fetch=real;}
 });
+
+test('an approved voucher can enter the queue before signing only with a matching decision',async()=>{
+ const {groupedInternalTransfers}=await import('../src/transfer.js');
+ const {r,j}=fixture(),hash=await fingerprint(r,j);
+ Object.assign(r.fields,{'บัญชีตรวจผ่าน':true,'ผู้ตรวจบัญชี':'A','เวลาบัญชีตรวจผ่าน':1,'ข้อมูลที่บัญชีตรวจผ่าน':hash,
+  'นอตตรวจผ่าน':true,'ผู้ตรวจสอบก่อนอนุมัติ':'N','เวลานอตตรวจผ่าน':2,'ข้อมูลที่นอตตรวจผ่าน':hash,
+  Approve:true,'หลักฐานส่งให้เมย์':'ส่งแล้ว • receipt'});
+ const decision={actor:'authorized',action:'accept',fingerprint:hash};
+ const owner={ctx:{storage:{list:async()=>new Map([['card',{message:'receipt',sent:true,recipient:'authorized',nonce:'n'}]]),get:async()=>decision}}};
+ assert.equal((await groupedInternalTransfers(owner,[{r,j}]))[0].pendingSignedPdf,true);
+ decision.actor='wrong';
+ assert.deepEqual(await groupedInternalTransfers(owner,[{r,j}]),[]);
+});
